@@ -221,10 +221,17 @@ def save_settings(settings):
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
 
+
+# CSV_ENCODING: "utf-8-sig"(BOM 포함)로 읽고 쓴다. BOM이 없는 순수 UTF-8 CSV를 엑셀에서
+# 직접 열면 한글이 깨져 보이는데(엑셀이 시스템 기본 코드페이지로 잘못 해석), BOM을 붙이면
+# 엑셀이 UTF-8로 정확히 인식한다. utf-8-sig로 읽으면 BOM 유무와 상관없이 항상 올바르게 읽힌다.
+CSV_ENCODING = "utf-8-sig"
+
+
 def load_csv_header(path):
     if not os.path.exists(path):
         return []
-    with open(path, "r", newline="", encoding="utf-8") as f:
+    with open(path, "r", newline="", encoding=CSV_ENCODING) as f:
         reader = csv.reader(f)
         try:
             return next(reader)
@@ -235,7 +242,7 @@ def load_csv_header(path):
 def load_csv_rows(path, columns):
     if not os.path.exists(path):
         return []
-    with open(path, "r", newline="", encoding="utf-8") as f:
+    with open(path, "r", newline="", encoding=CSV_ENCODING) as f:
         reader = csv.reader(f)
         rows = list(reader)
     if not rows:
@@ -245,10 +252,27 @@ def load_csv_rows(path, columns):
 
 def save_csv_rows(path, columns, rows):
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    with open(path, "w", newline="", encoding=CSV_ENCODING) as f:
         writer = csv.writer(f)
         writer.writerow(columns)
         writer.writerows(rows)
+
+
+def ensure_utf8_bom(path):
+    """기존에 BOM 없이 저장된 CSV 파일을 엑셀에서 열어도 한글이 깨지지 않도록,
+    내용은 그대로 두고 UTF-8 BOM만 추가해 둔다."""
+    if not os.path.exists(path):
+        return
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw.startswith(b"\xef\xbb\xbf") or not raw:
+        return
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    with open(path, "w", newline="", encoding=CSV_ENCODING) as f:
+        f.write(text)
 
 
 def clean_history_csv_if_needed():
@@ -284,6 +308,12 @@ def compute_price(material_cost, labor_ratio, sga_ratio, profit_margin):
 # --------------------------------------------------------------------------------------
 def maximize_window(win):
     """새 창을 화면 전체 크기로 띄운다 (요청사항 2)."""
+    win.update_idletasks()
+    # 창관리자가 없거나 "zoomed"/"-zoomed"가 무시되는 환경에서도 항상 화면 크기를
+    # 보장하도록, 실제 화면 크기로 우선 지정해 둔 뒤 OS 기본 최대화를 추가로 시도한다.
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    win.geometry(f"{sw}x{sh}+0+0")
     try:
         win.state("zoomed")
         return
@@ -291,13 +321,8 @@ def maximize_window(win):
         pass
     try:
         win.attributes("-zoomed", True)
-        return
     except tk.TclError:
         pass
-    win.update_idletasks()
-    sw = win.winfo_screenwidth()
-    sh = win.winfo_screenheight()
-    win.geometry(f"{sw}x{sh}+0+0")
 
 
 # --------------------------------------------------------------------------------------
@@ -497,7 +522,7 @@ class DataTreeview(ttk.Treeview):
         kind = classify_column(header)
         if kind == "percent":
             n = parse_number(raw_value, None)
-            edit_value = f"{n * 100:.1f}" if n is not None else ""
+            edit_value = f"{n * 100:.0f}" if n is not None else ""
         else:
             edit_value = "" if raw_value is None else str(raw_value)
 
@@ -536,18 +561,20 @@ class PumpPriceApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Pump 판가 계산기 (Python 이식판) - 대외비")
-        self.geometry("1360x780")
-        self.minsize(1100, 660)
+        self.geometry("1360x860")
+        self.minsize(1000, 660)
         self.configure(bg=COLOR_BG)
 
+        ensure_utf8_bom(RAWDATA_CSV)
+        ensure_utf8_bom(HISTORY_CSV)
         clean_history_csv_if_needed()
 
         self.settings = load_settings()
 
         self.material_cost_var = tk.StringVar(value=fmt_won(self.settings["material_cost"]))
-        self.profit_margin_var = tk.StringVar(value=f"{self.settings['profit_margin']*100:.1f}")
-        self.labor_ratio_var = tk.StringVar(value=f"{self.settings['labor_expense_ratio']*100:.1f}")
-        self.sga_ratio_var = tk.StringVar(value=f"{self.settings['sga_ratio']*100:.1f}")
+        self.profit_margin_var = tk.StringVar(value=f"{self.settings['profit_margin']*100:.0f}")
+        self.labor_ratio_var = tk.StringVar(value=f"{self.settings['labor_expense_ratio']*100:.0f}")
+        self.sga_ratio_var = tk.StringVar(value=f"{self.settings['sga_ratio']*100:.0f}")
 
         self.calc_labels = {}  # 원가구조(구 Sheet3) 계산결과 표시용 라벨 저장
 
@@ -563,6 +590,8 @@ class PumpPriceApp(tk.Tk):
         self._setup_style()
         self._build_main()
         self._recalc()
+        # 원가 구조 계산 패널을 포함한 전체 내용이 첫 실행부터 잘리지 않도록 최대화 상태로 띄운다.
+        self.after(0, lambda: maximize_window(self))
 
     # ---------------------------------------------------------------- 스타일 (요청사항 12)
     def _setup_style(self):
@@ -595,8 +624,11 @@ class PumpPriceApp(tk.Tk):
         style.configure("TCombobox", padding=4)
         style.configure("TNotebook", background=COLOR_BG, borderwidth=0)
 
-    def _card(self, master, **pack_kwargs):
+    def _card(self, master, width=None, **pack_kwargs):
         outer = tk.Frame(master, bg=COLOR_BORDER)
+        if width is not None:
+            outer.configure(width=width)
+            outer.pack_propagate(False)
         card = tk.Frame(outer, bg=COLOR_CARD)
         card.pack(fill="both", expand=True, padx=1, pady=1)
         if pack_kwargs:
@@ -623,16 +655,19 @@ class PumpPriceApp(tk.Tk):
 
         body = tk.Frame(self, bg=COLOR_BG)
         body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        body.columnconfigure(0, weight=1, uniform="col")
-        body.columnconfigure(1, weight=1, uniform="col")
+        # 판가계산기 패널은 고정 너비(요청사항), 원가 구조 계산 패널이 남는 폭을 모두 차지한다.
+        body.columnconfigure(0, weight=0)
+        body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
-        self._build_calc_panel(body).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self._build_calc_panel(body).grid(row=0, column=0, sticky="ns", padx=(0, 8))
         self._build_cost_panel(body).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
     # ---------------------------------------------------------------- 좌측: 판가계산기
+    CALC_PANEL_WIDTH = 520
+
     def _build_calc_panel(self, master):
-        outer, card = self._card(master)
+        outer, card = self._card(master, width=self.CALC_PANEL_WIDTH)
 
         tk.Label(card, text="판가계산기", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(
             anchor="w", padx=20, pady=(20, 14))
@@ -650,6 +685,9 @@ class PumpPriceApp(tk.Tk):
         e1.grid(row=1, column=0, ipady=8, padx=(0, 1))
         e1.bind("<FocusOut>", lambda e: self._on_material_cost_changed())
         e1.bind("<Return>", lambda e: self._on_material_cost_changed())
+        # 입력하는 동안에도(글자마다) 즉시 재계산되도록 trace를 건다. 콤마 서식은
+        # 포커스를 벗어날 때만(_on_material_cost_changed) 적용해 타이핑을 방해하지 않는다.
+        self.material_cost_var.trace_add("write", lambda *a: self._on_material_cost_live())
 
         pct_frame = tk.Frame(grid, bg=COLOR_CARD, highlightbackground="#C9CEDA",
                               highlightthickness=1, bd=0)
@@ -660,6 +698,7 @@ class PumpPriceApp(tk.Tk):
         tk.Label(pct_frame, text="%", font=("Malgun Gothic", 12), bg=COLOR_CARD).pack(side="left", padx=(2, 8))
         e2.bind("<FocusOut>", lambda e: self._on_profit_margin_changed())
         e2.bind("<Return>", lambda e: self._on_profit_margin_changed())
+        self.profit_margin_var.trace_add("write", lambda *a: self._on_profit_margin_live())
 
         result_outer = tk.Frame(card, bg=COLOR_HEADER_BG)
         result_outer.pack(fill="x", padx=20, pady=(24, 20))
@@ -680,16 +719,31 @@ class PumpPriceApp(tk.Tk):
 
         return outer
 
+    def _on_material_cost_live(self):
+        # 타이핑 중(엔터/포커스아웃 전)에도 거의 실시간으로 재계산만 반영한다 (요청사항).
+        val = parse_number(self.material_cost_var.get(), None)
+        if val is None:
+            return
+        self.settings["material_cost"] = val
+        self._recalc()
+
     def _on_material_cost_changed(self):
         val = parse_number(self.material_cost_var.get(), self.settings["material_cost"])
         self.settings["material_cost"] = val
         self.material_cost_var.set(fmt_won(val))
         self._recalc()
 
+    def _on_profit_margin_live(self):
+        val = parse_number(self.profit_margin_var.get(), None)
+        if val is None:
+            return
+        self.settings["profit_margin"] = val / 100.0
+        self._recalc()
+
     def _on_profit_margin_changed(self):
         val = parse_number(self.profit_margin_var.get(), self.settings["profit_margin"] * 100) / 100.0
         self.settings["profit_margin"] = val
-        self.profit_margin_var.set(f"{val*100:.1f}")
+        self.profit_margin_var.set(f"{val*100:.0f}")
         self._recalc()
 
     # ---------------------------------------------------------------- 우측: 원가 구조 (구 Sheet3, 요청사항 1)
@@ -961,7 +1015,7 @@ class PumpPriceApp(tk.Tk):
     def _on_register_history(self):
         summary = (
             f"재료비(원가) {fmt_won(self.settings['material_cost'])}원 · "
-            f"영업이익률 {self.settings['profit_margin']*100:.1f}% · "
+            f"영업이익률 {self.settings['profit_margin']*100:.0f}% · "
             f"적정 판가 {fmt_won(self._last_result['적정판가'])}원 으로 등록합니다."
         )
         dlg = HistoryRegisterDialog(self, summary)
