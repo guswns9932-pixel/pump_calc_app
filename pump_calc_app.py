@@ -752,41 +752,15 @@ class PumpPriceApp(tk.Tk):
         toolbar.pack(fill="x")
         tk.Label(toolbar, text="", bg=COLOR_BG).pack(side="left", expand=True, fill="x")
         ttk.Button(toolbar, text="🕒  이력 보기", command=self._open_history_window).pack(side="right", padx=(8, 0))
-        ttk.Button(toolbar, text="📄  Rawdata 보기", command=self._open_rawdata_window).pack(side="right")
+        ttk.Button(toolbar, text="📄  PUMP 판가 DATA 보기", command=self._open_rawdata_window).pack(side="right")
 
         tk.Label(
-            toolbar_wrap, text="※ Rawdata / 이력은 위 버튼을 눌러 새 창에서 확인합니다.",
+            toolbar_wrap, text="※ PUMP 판가 DATA / 이력은 위 버튼을 눌러 새 창에서 확인합니다.",
             font=("Malgun Gothic", 9), fg=COLOR_SUBTEXT, bg=COLOR_BG, anchor="e",
         ).pack(fill="x", pady=(4, 0))
 
-        # 창 높이가 내용보다 작아도(예: 최초 실행 시 1360x660) 잘리지 않고 스크롤로
-        # 전체 내용을 볼 수 있도록 본문을 캔버스로 감싼다.
-        scroll_wrap = tk.Frame(self, bg=COLOR_BG)
-        scroll_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-
-        canvas = tk.Canvas(scroll_wrap, bg=COLOR_BG, highlightthickness=0)
-        vscroll = ttk.Scrollbar(scroll_wrap, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vscroll.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        vscroll.pack(side="right", fill="y")
-
-        body = tk.Frame(canvas, bg=COLOR_BG)
-        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
-
-        def _sync_scrollregion(_event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        body.bind("<Configure>", _sync_scrollregion)
-
-        def _sync_body_width(event):
-            canvas.itemconfig(body_window, width=event.width)
-        canvas.bind("<Configure>", _sync_body_width)
-
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        # 메인 창(self) 범위에서만 동작하므로 Rawdata/이력 새 창의 스크롤에는 영향이 없다.
-        self.bind("<MouseWheel>", _on_mousewheel)
-        self.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-        self.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+        body = tk.Frame(self, bg=COLOR_BG)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
         # 판가계산기 패널은 고정 너비(요청사항), 원가 구조 계산 패널이 남는 폭을 모두 차지한다.
         body.columnconfigure(0, weight=0)
@@ -809,12 +783,12 @@ class PumpPriceApp(tk.Tk):
         grid.pack(padx=20, anchor="w")
 
         header_style = dict(font=FONT_BOLD, bg=COLOR_HEADER_BG, fg=COLOR_TEXT,
-                             relief="flat", width=18, height=2)
+                             relief="flat", width=12, height=2)
         tk.Label(grid, text="재료비(원가)", **header_style).grid(row=0, column=0, padx=(0, 1), pady=(0, 1), sticky="nsew")
         tk.Label(grid, text="영업이익률", **header_style).grid(row=0, column=1, pady=(0, 1), sticky="nsew")
 
         e1 = tk.Entry(grid, textvariable=self.material_cost_var, font=("Malgun Gothic", 12),
-                      relief="solid", bd=1, highlightthickness=0, width=18, justify="right")
+                      relief="solid", bd=1, highlightthickness=0, width=12, justify="right")
         e1.grid(row=1, column=0, ipady=8, padx=(0, 1))
         e1.bind("<FocusOut>", lambda e: self._on_material_cost_changed())
         e1.bind("<Return>", lambda e: self._on_material_cost_changed())
@@ -826,12 +800,18 @@ class PumpPriceApp(tk.Tk):
                               highlightthickness=1, bd=0)
         pct_frame.grid(row=1, column=1, ipady=8, sticky="nsew")
         e2 = tk.Entry(pct_frame, textvariable=self.profit_margin_var, font=("Malgun Gothic", 12),
-                      relief="flat", bd=0, width=14, justify="right")
+                      relief="flat", bd=0, width=7, justify="right")
         e2.pack(side="left", padx=(8, 0), fill="y")
         tk.Label(pct_frame, text="%", font=("Malgun Gothic", 12), bg=COLOR_CARD).pack(side="left", padx=(2, 8))
         e2.bind("<FocusOut>", lambda e: self._on_profit_margin_changed())
         e2.bind("<Return>", lambda e: self._on_profit_margin_changed())
         self.profit_margin_var.trace_add("write", lambda *a: self._on_profit_margin_live())
+
+        # 이력등록 버튼을 재료비/영업이익률 표 오른쪽에 붙여 배치한다 (요청사항).
+        register_btn = ttk.Button(
+            grid, text="이력등록\nCLICK!", style="Accent.TButton", command=self._on_register_history,
+        )
+        register_btn.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(12, 0))
 
         result_outer = tk.Frame(card, bg=COLOR_HEADER_BG)
         result_outer.pack(fill="x", padx=20, pady=(24, 20))
@@ -840,10 +820,6 @@ class PumpPriceApp(tk.Tk):
         self.summary_label = tk.Label(result_outer, text="", justify="left", anchor="w",
                                        font=FONT_MONO, bg=COLOR_HEADER_BG, fg=COLOR_TEXT)
         self.summary_label.pack(fill="x", padx=16, pady=(0, 16))
-
-        ttk.Button(
-            card, text="이력등록 CLICK!", style="Accent.TButton", command=self._on_register_history,
-        ).pack(padx=20, pady=(0, 20), anchor="w")
 
         return outer
 
@@ -890,7 +866,7 @@ class PumpPriceApp(tk.Tk):
         grid.pack(padx=20, pady=(0, 8), fill="x")
 
         headers = ["분류", "구분", "금액", "비율", "비율 상세", "기본값 산정 근거"]
-        widths = [9, 12, 15, 9, 16, 20]
+        widths = [7, 9, 12, 7, 14, 15]
         for c, h in enumerate(headers):
             tk.Label(grid, text=h, font=("Malgun Gothic", 9, "bold"), bg=COLOR_HEADER_BG, fg=COLOR_TEXT,
                      relief="flat", width=widths[c], height=2).grid(
@@ -904,10 +880,13 @@ class PumpPriceApp(tk.Tk):
                              bg=COLOR_INPUT_BG)
                 e.grid(row=row, column=col, sticky="nsew", ipady=5, padx=(0 if col == 0 else 1, 0), pady=1)
                 return e
+            # 분류/구분/비율처럼 짧은 열은 줄바꿈 없이 한 줄로, 비율 상세/근거처럼 긴
+            # 설명이 들어가는 열만 줄바꿈해 어색하게 단어 중간에서 잘리지 않게 한다.
+            wrap = width * 9 if col in (4, 5) else 0
             lbl = tk.Label(grid, text=text, width=width, relief="flat",
                             font=("Malgun Gothic", 10, "bold" if bold else "normal"),
                             bg=COLOR_CARD if not bold else COLOR_HEADER_BG, fg=COLOR_TEXT,
-                            wraplength=width * 8, justify="left", anchor="w", padx=6)
+                            wraplength=wrap, justify="left", anchor="w", padx=6)
             lbl.grid(row=row, column=col, sticky="nsew", ipady=5, padx=(0 if col == 0 else 1, 0), pady=1)
             return lbl
 
@@ -925,7 +904,7 @@ class PumpPriceApp(tk.Tk):
         self.calc_labels["노무비_금액"] = cell(2, 2, "-")
         cell(2, 3, "", editable_var=self.labor_ratio_var)
         self.calc_labels["노무비_상세"] = cell(2, 4, "-")
-        cell(2, 5, "Rawdata 기준 평균값")
+        cell(2, 5, "PUMP 판가 DATA 기준 평균값")
 
         # Row3: 판관비 (비율 EDITABLE)
         cell(3, 0, "판매관리비")
@@ -982,14 +961,14 @@ class PumpPriceApp(tk.Tk):
             return
 
         win = tk.Toplevel(self)
-        win.title("Rawdata - 조회 전용")
+        win.title("PUMP 판가 DATA - 조회 전용")
         win.configure(bg=COLOR_BG)
         maximize_window(win)
         self._rawdata_win = win
 
         top = tk.Frame(win, bg=COLOR_BG)
         top.pack(fill="x", padx=18, pady=14)
-        tk.Label(top, text="Rawdata", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_TEXT).pack(side="left")
+        tk.Label(top, text="PUMP 판가 DATA", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_TEXT).pack(side="left")
         tk.Label(top, text="  조회 전용 (수정 불가)", font=("Malgun Gothic", 10), bg=COLOR_BG,
                  fg=COLOR_SUBTEXT).pack(side="left")
         ttk.Button(top, text="닫기", command=win.destroy).pack(side="right")
@@ -1200,6 +1179,7 @@ class PumpPriceApp(tk.Tk):
         material_cost_raw = self.settings["material_cost"]
         profit_margin_raw = self.settings["profit_margin"]
         calc_amount_raw = self._last_result["적정판가"]
+        note_text = self._build_note_with_ratio_changes(values["v_note"])
         new_row = [
             next_no,
             today,
@@ -1222,7 +1202,7 @@ class PumpPriceApp(tk.Tk):
             values["v_fscToBe"],
             values["v_sec"],
             values["v_lot"],
-            values["v_note"],
+            note_text,
         ]
         existing_rows.append(new_row)
         save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, existing_rows)
@@ -1230,6 +1210,21 @@ class PumpPriceApp(tk.Tk):
         messagebox.showinfo("이력등록", f"이력이 등록되었습니다. (No. {next_no})")
         # 팝업이 계속 뜨는 대신, 등록된 내용을 바로 이력 창에서 확인할 수 있도록 연다.
         self._open_history_window(select_no=next_no)
+
+    def _build_note_with_ratio_changes(self, manual_note):
+        """노무비+경비/판관비 비율이 기본값(20%/30%)이 아니면 비고에 자동으로 남긴다 (요청사항).
+        예: 노무비+경비 10% 반영, 판관비 5% 반영"""
+        auto_notes = []
+        labor_ratio = self.settings["labor_expense_ratio"]
+        sga_ratio = self.settings["sga_ratio"]
+        if abs(labor_ratio - DEFAULT_SETTINGS["labor_expense_ratio"]) > 1e-9:
+            auto_notes.append(f"노무비+경비 {labor_ratio*100:.0f}% 반영")
+        if abs(sga_ratio - DEFAULT_SETTINGS["sga_ratio"]) > 1e-9:
+            auto_notes.append(f"판관비 {sga_ratio*100:.0f}% 반영")
+        if not auto_notes:
+            return manual_note
+        auto_text = ", ".join(auto_notes)
+        return f"{manual_note} ({auto_text})" if manual_note else auto_text
 
 
 if __name__ == "__main__":
