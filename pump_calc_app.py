@@ -682,7 +682,7 @@ class PumpPriceApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Pump 판가 계산기 (Python 이식판) - 대외비")
-        self.geometry("1360x660")
+        self.geometry("1120x660")
         self.minsize(1000, 480)
         self.configure(bg=COLOR_BG)
 
@@ -741,6 +741,8 @@ class PumpPriceApp(tk.Tk):
         style.map("Accent.TButton",
                   background=[("active", COLOR_ACCENT_DARK), ("pressed", COLOR_ACCENT_DARK)],
                   foreground=[("disabled", "#AAAAAA")])
+
+        style.configure("Compact.TButton", font=("Malgun Gothic", 9), padding=(6, 3))
 
         style.configure("TCombobox", padding=4)
         style.configure("TNotebook", background=COLOR_BG, borderwidth=0)
@@ -889,29 +891,33 @@ class PumpPriceApp(tk.Tk):
         grid.pack(padx=20, pady=(0, 8), fill="x")
 
         # 초기화 버튼을 "기본값 산정 근거" 열(마지막 열) 바로 위에 배치한다 (요청사항).
-        ttk.Button(grid, text="초기화", command=self._on_reset_cost_ratios).grid(
+        ttk.Button(grid, text="초기화", style="Compact.TButton",
+                   command=self._on_reset_cost_ratios).grid(
             row=0, column=5, sticky="e", pady=(0, 4))
 
+        # 열 너비를 문자수로 임의 지정하지 않고, 짧은 열(분류/구분/금액/비율)은 내용
+        # 그대로 한 줄에 맞춰 자동으로 최소 폭을 갖게 하고, 긴 설명이 들어가는 열(비율
+        # 상세/근거)만 wraplength로 2줄까지 줄바꿈되게 해서 잘리는 글자 없이 타이트하게
+        # 맞춘다 (요청사항: 여백 축소).
         headers = ["분류", "구분", "금액", "비율", "비율 상세", "기본값 산정 근거"]
-        widths = [7, 9, 12, 7, 14, 15]
+        WRAP_COLS = (4, 5)
+        WRAP_PX = 100
         for c, h in enumerate(headers):
+            wrap = WRAP_PX if c in WRAP_COLS else 0
             tk.Label(grid, text=h, font=("Malgun Gothic", 9, "bold"), bg=COLOR_HEADER_BG, fg=COLOR_TEXT,
-                     relief="flat", width=widths[c], height=2).grid(
+                     relief="flat", height=2, wraplength=wrap, justify="center").grid(
                 row=1, column=c, sticky="nsew", padx=(0 if c == 0 else 1, 0), pady=(0, 1))
 
         def cell(row, col, text, editable_var=None, bold=False):
-            width = widths[col]
             if editable_var is not None:
-                e = tk.Entry(grid, textvariable=editable_var, width=width, justify="center",
+                e = tk.Entry(grid, textvariable=editable_var, width=6, justify="center",
                              relief="solid", bd=1, highlightthickness=0, font=("Malgun Gothic", 10),
                              bg=COLOR_INPUT_BG)
                 e.grid(row=row, column=col, sticky="nsew", ipady=5, padx=(0 if col == 0 else 1, 0), pady=1)
                 return e
-            # 분류/구분/비율처럼 짧은 열은 줄바꿈 없이 한 줄로, 비율 상세/근거처럼 긴
-            # 설명이 들어가는 열만 줄바꿈해 어색하게 단어 중간에서 잘리지 않게 한다.
-            wrap = width * 9 if col in (4, 5) else 0
             # 표의 모든 값은 가운데 정렬한다 (요청사항).
-            lbl = tk.Label(grid, text=text, width=width, relief="flat",
+            wrap = WRAP_PX if col in WRAP_COLS else 0
+            lbl = tk.Label(grid, text=text, relief="flat",
                             font=("Malgun Gothic", 10, "bold" if bold else "normal"),
                             bg=COLOR_CARD if not bold else COLOR_HEADER_BG, fg=COLOR_TEXT,
                             wraplength=wrap, justify="center", anchor="center", padx=6)
