@@ -966,6 +966,10 @@ class PumpPriceApp(tk.Tk):
         cell(6, 4, "", bold=True)
         cell(6, 5, "", bold=True)
 
+        # 표가 패널(670px) 가로 폭을 꽉 채우도록 남는 공간을 열들에 비례 배분한다 (요청사항).
+        for c in range(6):
+            grid.columnconfigure(c, weight=1)
+
         self.labor_ratio_var.trace_add(
             "write", lambda *a: self._on_ratio_var_changed("labor_expense_ratio", self.labor_ratio_var))
         self.sga_ratio_var.trace_add(
