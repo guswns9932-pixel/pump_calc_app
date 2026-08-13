@@ -771,16 +771,16 @@ class PumpPriceApp(tk.Tk):
         self._build_cost_panel(body).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
     # ---------------------------------------------------------------- 좌측: 판가계산기
-    CALC_PANEL_WIDTH = 520
-
     def _build_calc_panel(self, master):
-        outer, card = self._card(master, width=self.CALC_PANEL_WIDTH)
+        # 고정 너비를 주지 않고 내용(표+버튼)에 맞춰 패널이 저절로 타이트하게 감싸도록 한다
+        # (요청사항: 표~버튼 너비와 계산 결과 상자 너비를 맞추고 남는 여백을 없앤다).
+        outer, card = self._card(master)
 
         tk.Label(card, text="판가계산기", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(
             anchor="w", padx=20, pady=(20, 14))
 
         grid = tk.Frame(card, bg=COLOR_CARD)
-        grid.pack(padx=20, anchor="w")
+        grid.pack(padx=20, pady=(0, 20), anchor="w")
 
         header_style = dict(font=FONT_BOLD, bg=COLOR_HEADER_BG, fg=COLOR_TEXT,
                              relief="flat", width=12, height=2)
@@ -813,8 +813,10 @@ class PumpPriceApp(tk.Tk):
         )
         register_btn.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(12, 0))
 
-        result_outer = tk.Frame(card, bg=COLOR_HEADER_BG)
-        result_outer.pack(fill="x", padx=20, pady=(24, 20))
+        # 계산 결과 상자를 표/버튼과 같은 grid의 3개 열에 걸쳐 배치해서, 위쪽 표~버튼의
+        # 총 너비와 정확히 같은 너비를 갖도록 한다 (요청사항).
+        result_outer = tk.Frame(grid, bg=COLOR_HEADER_BG)
+        result_outer.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(20, 0))
         tk.Label(result_outer, text="계산 결과", font=FONT_SUBTITLE, bg=COLOR_HEADER_BG,
                  fg=COLOR_TEXT, anchor="w").pack(fill="x", padx=16, pady=(14, 4))
         self.summary_label = tk.Label(result_outer, text="", justify="left", anchor="w",
@@ -884,10 +886,11 @@ class PumpPriceApp(tk.Tk):
             # 분류/구분/비율처럼 짧은 열은 줄바꿈 없이 한 줄로, 비율 상세/근거처럼 긴
             # 설명이 들어가는 열만 줄바꿈해 어색하게 단어 중간에서 잘리지 않게 한다.
             wrap = width * 9 if col in (4, 5) else 0
+            # 표의 모든 값은 가운데 정렬한다 (요청사항).
             lbl = tk.Label(grid, text=text, width=width, relief="flat",
                             font=("Malgun Gothic", 10, "bold" if bold else "normal"),
                             bg=COLOR_CARD if not bold else COLOR_HEADER_BG, fg=COLOR_TEXT,
-                            wraplength=wrap, justify="left", anchor="w", padx=6)
+                            wraplength=wrap, justify="center", anchor="center", padx=6)
             lbl.grid(row=row, column=col, sticky="nsew", ipady=5, padx=(0 if col == 0 else 1, 0), pady=1)
             return lbl
 
