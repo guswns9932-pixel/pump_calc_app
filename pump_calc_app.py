@@ -20,22 +20,34 @@ Pump 판가 계산기 (Python 이식판)
 
 import os
 import re
+import sys
 import csv
+import glob
 import json
+import shutil
+import zipfile
 import datetime
+import xml.sax.saxutils as xml_escape
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from tkinter import font as tkfont
 
 # --------------------------------------------------------------------------------------
 # 경로 / 상수
 # --------------------------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # PyInstaller 등으로 exe 패키징된 경우, 임시 압축 해제 폴더가 아니라 exe가 실제로
+    # 놓인 폴더를 기준으로 삼아야 data 폴더가 실행할 때마다 유지된다.
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 RAWDATA_CSV = os.path.join(DATA_DIR, "rawdata.csv")
 HISTORY_CSV = os.path.join(DATA_DIR, "history.csv")
 SETTINGS_JSON = os.path.join(DATA_DIR, "settings.json")
 HISTORY_EDIT_LOG = os.path.join(DATA_DIR, "history_edit_log.txt")
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+MAX_HISTORY_BACKUPS = 20
 
 HISTORY_COLUMNS = [
     "No.", "일시", "제출여부", "지역", "고객구분", "사업부", "대공정", "세부공정",
@@ -253,11 +265,43 @@ def load_csv_rows(path, columns):
 
 
 def save_csv_rows(path, columns, rows):
+    """임시 파일에 먼저 쓴 뒤 교체(os.replace)하는 원자적 저장. 저장 도중 프로그램이
+    강제 종료되거나 디스크 오류가 나도 기존 파일이 반쯤 쓰인 상태로 깨지지 않는다
+    (요청사항: 저장 전 안전망)."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, "w", newline="", encoding=CSV_ENCODING) as f:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", newline="", encoding=CSV_ENCODING) as f:
         writer = csv.writer(f)
         writer.writerow(columns)
         writer.writerows(rows)
+    os.replace(tmp_path, path)
+
+
+def backup_history_csv():
+    """이력 CSV를 덮어쓰기 전에 타임스탬프가 붙은 복사본을 남겨 두어, 잘못된 수정이나
+    삭제를 사람이 직접 되돌릴 수 있게 한다. 오래된 백업은 최근 MAX_HISTORY_BACKUPS개만
+    남기고 자동으로 정리한다 (요청사항: 저장 전 백업)."""
+    if not os.path.exists(HISTORY_CSV):
+        return
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup_path = os.path.join(BACKUP_DIR, f"history_{timestamp}.csv")
+    try:
+        shutil.copy2(HISTORY_CSV, backup_path)
+    except OSError:
+        return  # 백업 실패는 저장 자체를 막지 않는다
+    backups = sorted(glob.glob(os.path.join(BACKUP_DIR, "history_*.csv")))
+    for old_backup in backups[:-MAX_HISTORY_BACKUPS] if len(backups) > MAX_HISTORY_BACKUPS else []:
+        try:
+            os.remove(old_backup)
+        except OSError:
+            pass
+
+
+def save_history_csv(rows):
+    """이력 저장은 항상 이 함수를 통해서만 이루어져, 저장 직전 백업이 빠지지 않게 한다."""
+    backup_history_csv()
+    save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, rows)
 
 
 def ensure_utf8_bom(path):
@@ -290,7 +334,7 @@ def clean_history_csv_if_needed():
             changed = True
         cleaned_rows.append(new_row)
     if changed:
-        save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, cleaned_rows)
+        save_history_csv(cleaned_rows)
 
 
 def _write_history_log_line(no_value, context_label, detail_text):
@@ -314,6 +358,105 @@ def append_history_edit_log(no_value, context_label, header, old_display, new_di
 def append_history_register_log(no_value, context_label, summary):
     """이력등록으로 새 행이 추가된 것도 동일한 로그 파일에 남긴다 (요청사항)."""
     _write_history_log_line(no_value, context_label, f"신규 등록: {summary}")
+
+
+def append_history_delete_log(no_value, context_label, summary):
+    """이력 삭제도 동일한 로그 파일에 남긴다 (요청사항)."""
+    _write_history_log_line(no_value, context_label, f"삭제됨: {summary}")
+
+
+# --------------------------------------------------------------------------------------
+# 엑셀(.xlsx) 내보내기 — 외부 라이브러리 없이 표준 라이브러리(zipfile)만으로 최소한의
+# 유효한 .xlsx 파일을 직접 생성한다 (요청사항: 엑셀 내보내기, 외부 라이브러리 설치 불필요
+# 원칙 유지).
+# --------------------------------------------------------------------------------------
+_XLSX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>"""
+
+_XLSX_ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+
+_XLSX_WORKBOOK_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+
+_XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="2">
+<font><sz val="11"/><name val="Calibri"/></font>
+<font><b/><sz val="11"/><name val="Calibri"/></font>
+</fonts>
+<fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="2">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+</cellXfs>
+</styleSheet>"""
+
+
+def _xlsx_col_letter(n):
+    """0부터 시작하는 열 번호를 엑셀 열 문자(A, B, ..., Z, AA, ...)로 변환."""
+    letters = ""
+    n += 1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def _xlsx_workbook_xml(sheet_name):
+    safe_name = xml_escape.escape(sheet_name)[:31] or "Sheet1"
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets><sheet name="{safe_name}" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+
+
+def _xlsx_sheet_xml(headers, rows):
+    """모든 셀을 inlineStr(문자열)로 기록한다 — 앱 화면에 보이는 서식(콤마/퍼센트)
+    그대로를 내보내므로 숫자 서식 관련 예외 상황을 피할 수 있어 가장 안전하다."""
+    parts = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             '<sheetData>']
+
+    def cell_xml(col_idx, row_num, text, style=0):
+        ref = f"{_xlsx_col_letter(col_idx)}{row_num}"
+        escaped = xml_escape.escape(str(text) if text is not None else "")
+        style_attr = f' s="{style}"' if style else ""
+        return f'<c r="{ref}" t="inlineStr"{style_attr}><is><t xml:space="preserve">{escaped}</t></is></c>'
+
+    header_cells = "".join(cell_xml(c, 1, h, style=1) for c, h in enumerate(headers))
+    parts.append(f'<row r="1">{header_cells}</row>')
+    for r, row in enumerate(rows, start=2):
+        row_cells = "".join(cell_xml(c, r, v) for c, v in enumerate(row))
+        parts.append(f'<row r="{r}">{row_cells}</row>')
+    parts.append("</sheetData></worksheet>")
+    return "".join(parts)
+
+
+def export_rows_to_xlsx(path, sheet_name, headers, rows):
+    """표준 라이브러리(zipfile)만으로 최소한의 유효한 .xlsx 파일을 생성한다."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _XLSX_CONTENT_TYPES)
+        zf.writestr("_rels/.rels", _XLSX_ROOT_RELS)
+        zf.writestr("xl/workbook.xml", _xlsx_workbook_xml(sheet_name))
+        zf.writestr("xl/_rels/workbook.xml.rels", _XLSX_WORKBOOK_RELS)
+        zf.writestr("xl/styles.xml", _XLSX_STYLES)
+        zf.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml(headers, rows))
 
 
 # --------------------------------------------------------------------------------------
@@ -464,6 +607,7 @@ class DataTreeview(ttk.Treeview):
         self.sort_column = sort_column
         self.sort_desc = sort_desc
         self._raw_rows = []
+        self._last_keyword = ""
         self._default_widths = [110] * len(self.headers)
 
         for cid, header in zip(self.col_ids, self.headers):
@@ -527,6 +671,7 @@ class DataTreeview(ttk.Treeview):
     def apply_filter(self, keyword):
         self._close_editor()
         self.delete(*self.get_children())
+        self._last_keyword = keyword
         kw = keyword.strip().lower()
         indices = self._sorted_indices()
         for idx in indices:
@@ -540,6 +685,19 @@ class DataTreeview(ttk.Treeview):
                 display_row = [self._format_cell(h, v) for h, v in zip(self.headers, row)]
             self.insert("", tk.END, iid=str(idx), values=display_row)
         return len(self.get_children())
+
+    # ---------------------------------------------------------------- 행 삭제 (요청사항)
+    def delete_rows_by_index(self, indices):
+        """row_index(=현재 iid) 목록을 받아 _raw_rows에서 제거하고 화면을 다시 그린다.
+        삭제된 (원래 index, 그 행의 값) 목록을 오름차순으로 반환한다 (로그 기록용)."""
+        unique_indices = sorted(set(i for i in indices if 0 <= i < len(self._raw_rows)))
+        removed = [(i, self._raw_rows[i]) for i in unique_indices]
+        for i in reversed(unique_indices):
+            del self._raw_rows[i]
+        self.apply_filter(getattr(self, "_last_keyword", ""))
+        if self.on_change:
+            self.on_change()
+        return removed
 
     def _sorted_indices(self):
         indices = list(range(len(self._raw_rows)))
@@ -1044,6 +1202,7 @@ class PumpPriceApp(tk.Tk):
                  fg=COLOR_SUBTEXT).pack(side="left")
         ttk.Button(top, text="닫기", command=win.destroy).pack(side="right")
         ttk.Button(top, text="새로고침", command=self._reload_rawdata_window).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="엑셀로 내보내기", command=self._export_rawdata_to_excel).pack(side="right", padx=(0, 8))
 
         search_bar = tk.Frame(win, bg=COLOR_BG)
         search_bar.pack(fill="x", padx=18, pady=(0, 12))
@@ -1098,6 +1257,31 @@ class PumpPriceApp(tk.Tk):
         total = len(self._rawdata_tree.get_raw_rows())
         self._rawdata_count_label.config(text=f"{shown} / {total}건 표시")
 
+    def _export_rawdata_to_excel(self):
+        self._export_tree_to_excel(self._rawdata_tree, "PUMP 판가 DATA", "PUMP_판가_DATA")
+
+    def _export_history_to_excel(self):
+        self._export_tree_to_excel(self._history_tree, "이력", "이력")
+
+    def _export_tree_to_excel(self, tree, sheet_name, default_filename):
+        """현재 화면에 표시된(검색/정렬 적용된) 내용을 .xlsx로 내보낸다 (요청사항)."""
+        if tree is None or not tree.get_children():
+            messagebox.showinfo("엑셀로 내보내기", "내보낼 데이터가 없습니다.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="엑셀로 내보내기", defaultextension=".xlsx",
+            filetypes=[("Excel 파일", "*.xlsx")], initialfile=default_filename,
+        )
+        if not path:
+            return
+        rows = [list(tree.item(iid)["values"]) for iid in tree.get_children()]
+        try:
+            export_rows_to_xlsx(path, sheet_name, tree.headers, rows)
+        except OSError as e:
+            messagebox.showerror("내보내기 실패", f"엑셀 파일을 저장하지 못했습니다.\n{e}")
+            return
+        messagebox.showinfo("내보내기 완료", f"{len(rows)}건을 저장했습니다.\n{path}")
+
     # ---------------------------------------------------------------- 이력 새창 (요청사항 2, 5, 6, 7, 11)
     def _open_history_window(self, select_no=None):
         if self._history_win is not None and self._history_win.winfo_exists():
@@ -1119,6 +1303,8 @@ class PumpPriceApp(tk.Tk):
                  fg=COLOR_SUBTEXT).pack(side="left")
         ttk.Button(top, text="닫기", command=win.destroy).pack(side="right")
         ttk.Button(top, text="새로고침", command=self._reload_history_window).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="엑셀로 내보내기", command=self._export_history_to_excel).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="선택 삭제", command=self._on_delete_selected_history).pack(side="right", padx=(0, 8))
 
         search_bar = tk.Frame(win, bg=COLOR_BG)
         search_bar.pack(fill="x", padx=18, pady=(0, 12))
@@ -1191,7 +1377,7 @@ class PumpPriceApp(tk.Tk):
     def _on_history_changed(self):
         if self._history_tree is None:
             return
-        save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, self._history_tree.get_raw_rows())
+        save_history_csv(self._history_tree.get_raw_rows())
         self._update_history_count()
 
     def _on_history_cell_edited(self, row_index, header, old_value, new_value):
@@ -1214,6 +1400,36 @@ class PumpPriceApp(tk.Tk):
         old_display = tree.format_cell(header, old_value)
         new_display = tree.format_cell(header, new_value)
         append_history_edit_log(no_value, context_label, header, old_display, new_display)
+
+    def _on_delete_selected_history(self):
+        """선택한 이력 행을 삭제한다 (요청사항). 삭제 전 확인을 받고, 로그에도 남긴다."""
+        tree = self._history_tree
+        if tree is None:
+            return
+        selected_iids = tree.selection()
+        if not selected_iids:
+            messagebox.showinfo("이력 삭제", "삭제할 행을 먼저 선택하세요.")
+            return
+
+        indices = sorted(int(iid) for iid in selected_iids)
+        raw_rows = tree.get_raw_rows()
+        no_values = [raw_rows[i][HISTORY_COLUMNS.index("No.")] for i in indices if i < len(raw_rows)]
+        no_list_text = ", ".join(f"No.{n}" for n in no_values)
+        if not messagebox.askyesno(
+            "이력 삭제",
+            f"{len(indices)}건({no_list_text})을 삭제하시겠습니까?\n삭제 후에는 이 화면에서 되돌릴 수 없습니다.\n"
+            f"(단, data/backups 폴더에 삭제 전 상태가 자동 백업되어 있습니다.)",
+        ):
+            return
+
+        removed = tree.delete_rows_by_index(indices)  # on_change 콜백이 저장까지 처리
+        for row_index, row in removed:
+            no_value = row[HISTORY_COLUMNS.index("No.")] if row else None
+            model_value = row[HISTORY_COLUMNS.index("장비 모델")] if row else ""
+            context_label = f"장비 모델: {model_value}" if model_value else ""
+            cost_display = tree.format_cell("재료비(원가)", row[HISTORY_COLUMNS.index("재료비(원가)")]) if row else ""
+            summary = f"재료비(원가) {cost_display}원" if cost_display else "(재료비 정보 없음)"
+            append_history_delete_log(no_value, context_label, summary)
 
     # ---------------------------------------------------------------- 계산 / 재계산
     def _recalc(self):
@@ -1298,7 +1514,7 @@ class PumpPriceApp(tk.Tk):
             note_text,
         ]
         existing_rows.append(new_row)
-        save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, existing_rows)
+        save_history_csv(existing_rows)
 
         register_summary = (
             f"재료비(원가) {fmt_won(material_cost_raw)}원 · 영업이익률 {profit_margin_raw*100:.0f}% · "
