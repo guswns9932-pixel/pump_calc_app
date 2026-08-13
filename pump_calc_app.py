@@ -854,23 +854,24 @@ class PumpPriceApp(tk.Tk):
     def _build_cost_panel(self, master):
         outer, card = self._card(master)
 
-        title_row = tk.Frame(card, bg=COLOR_CARD)
-        title_row.pack(fill="x", padx=20, pady=(20, 4))
-        tk.Label(title_row, text="원가 구조 계산", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(side="left")
-        ttk.Button(title_row, text="초기화", command=self._on_reset_cost_ratios).pack(side="right")
-
+        tk.Label(card, text="원가 구조 계산", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(
+            anchor="w", padx=20, pady=(20, 4))
         tk.Label(card, text="비율(노란 칸)은 직접 입력할 수 있습니다.", font=("Malgun Gothic", 9),
                  bg=COLOR_CARD, fg=COLOR_SUBTEXT).pack(anchor="w", padx=20, pady=(0, 14))
 
         grid = tk.Frame(card, bg=COLOR_CARD)
         grid.pack(padx=20, pady=(0, 8), fill="x")
 
+        # 초기화 버튼을 "기본값 산정 근거" 열(마지막 열) 바로 위에 배치한다 (요청사항).
+        ttk.Button(grid, text="초기화", command=self._on_reset_cost_ratios).grid(
+            row=0, column=5, sticky="e", pady=(0, 4))
+
         headers = ["분류", "구분", "금액", "비율", "비율 상세", "기본값 산정 근거"]
         widths = [7, 9, 12, 7, 14, 15]
         for c, h in enumerate(headers):
             tk.Label(grid, text=h, font=("Malgun Gothic", 9, "bold"), bg=COLOR_HEADER_BG, fg=COLOR_TEXT,
                      relief="flat", width=widths[c], height=2).grid(
-                row=0, column=c, sticky="nsew", padx=(0 if c == 0 else 1, 0), pady=(0, 1))
+                row=1, column=c, sticky="nsew", padx=(0 if c == 0 else 1, 0), pady=(0, 1))
 
         def cell(row, col, text, editable_var=None, bold=False):
             width = widths[col]
@@ -890,45 +891,45 @@ class PumpPriceApp(tk.Tk):
             lbl.grid(row=row, column=col, sticky="nsew", ipady=5, padx=(0 if col == 0 else 1, 0), pady=1)
             return lbl
 
-        # Row1: 원가 / 재료비
-        cell(1, 0, "원가")
-        cell(1, 1, "재료비")
-        self.calc_labels["재료비_금액"] = cell(1, 2, "-")
-        cell(1, 3, "-")
-        cell(1, 4, "연구소 및 구매팀")
-        cell(1, 5, "-")
+        # Row2: 원가 / 재료비
+        cell(2, 0, "원가")
+        cell(2, 1, "재료비")
+        self.calc_labels["재료비_금액"] = cell(2, 2, "-")
+        cell(2, 3, "-")
+        cell(2, 4, "연구소 및 구매팀")
+        cell(2, 5, "-")
 
-        # Row2: 노무비+경비 (비율 EDITABLE)
-        cell(2, 0, "")
-        cell(2, 1, "노무비+경비")
-        self.calc_labels["노무비_금액"] = cell(2, 2, "-")
-        cell(2, 3, "", editable_var=self.labor_ratio_var)
-        self.calc_labels["노무비_상세"] = cell(2, 4, "-")
-        cell(2, 5, "PUMP 판가 DATA 기준 평균값")
+        # Row3: 노무비+경비 (비율 EDITABLE)
+        cell(3, 0, "")
+        cell(3, 1, "노무비+경비")
+        self.calc_labels["노무비_금액"] = cell(3, 2, "-")
+        cell(3, 3, "", editable_var=self.labor_ratio_var)
+        self.calc_labels["노무비_상세"] = cell(3, 4, "-")
+        cell(3, 5, "PUMP 판가 DATA 기준 평균값")
 
-        # Row3: 판관비 (비율 EDITABLE)
-        cell(3, 0, "판매관리비")
-        cell(3, 1, "판관비")
-        self.calc_labels["판관비_금액"] = cell(3, 2, "-")
-        cell(3, 3, "", editable_var=self.sga_ratio_var)
-        self.calc_labels["판관비_상세"] = cell(3, 4, "-")
-        cell(3, 5, "제조업 평균값")
+        # Row4: 판관비 (비율 EDITABLE)
+        cell(4, 0, "판매관리비")
+        cell(4, 1, "판관비")
+        self.calc_labels["판관비_금액"] = cell(4, 2, "-")
+        cell(4, 3, "", editable_var=self.sga_ratio_var)
+        self.calc_labels["판관비_상세"] = cell(4, 4, "-")
+        cell(4, 5, "제조업 평균값")
 
-        # Row4: 영업이익 (비율은 판가계산기 입력값과 연동, 읽기전용)
-        cell(4, 0, "이익")
-        cell(4, 1, "영업이익")
-        self.calc_labels["영업이익_금액"] = cell(4, 2, "-")
-        self.calc_labels["영업이익_비율"] = cell(4, 3, "-")
-        self.calc_labels["영업이익_상세"] = cell(4, 4, "-")
-        cell(4, 5, "-")
+        # Row5: 영업이익 (비율은 판가계산기 입력값과 연동, 읽기전용)
+        cell(5, 0, "이익")
+        cell(5, 1, "영업이익")
+        self.calc_labels["영업이익_금액"] = cell(5, 2, "-")
+        self.calc_labels["영업이익_비율"] = cell(5, 3, "-")
+        self.calc_labels["영업이익_상세"] = cell(5, 4, "-")
+        cell(5, 5, "-")
 
-        # Row5: 적정 판가
-        cell(5, 0, "적정 판가", bold=True)
-        cell(5, 1, "", bold=True)
-        self.calc_labels["적정판가"] = cell(5, 2, "-", bold=True)
-        cell(5, 3, "", bold=True)
-        cell(5, 4, "", bold=True)
-        cell(5, 5, "", bold=True)
+        # Row6: 적정 판가
+        cell(6, 0, "적정 판가", bold=True)
+        cell(6, 1, "", bold=True)
+        self.calc_labels["적정판가"] = cell(6, 2, "-", bold=True)
+        cell(6, 3, "", bold=True)
+        cell(6, 4, "", bold=True)
+        cell(6, 5, "", bold=True)
 
         self.labor_ratio_var.trace_add(
             "write", lambda *a: self._on_ratio_var_changed("labor_expense_ratio", self.labor_ratio_var))
