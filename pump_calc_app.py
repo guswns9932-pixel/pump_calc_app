@@ -682,7 +682,7 @@ class PumpPriceApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Pump 판가 계산기 (Python 이식판) - 대외비")
-        self.geometry("1120x660")
+        self.geometry("1200x660")
         self.minsize(1000, 480)
         self.configure(bg=COLOR_BG)
 
@@ -879,8 +879,10 @@ class PumpPriceApp(tk.Tk):
         self._recalc()
 
     # ---------------------------------------------------------------- 우측: 원가 구조 (구 Sheet3, 요청사항 1)
+    COST_PANEL_WIDTH = 670
+
     def _build_cost_panel(self, master):
-        outer, card = self._card(master)
+        outer, card = self._card(master, width=self.COST_PANEL_WIDTH)
 
         tk.Label(card, text="원가 구조 계산", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(
             anchor="w", padx=20, pady=(20, 4))
