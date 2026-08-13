@@ -25,6 +25,7 @@ import json
 import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import font as tkfont
 
 # --------------------------------------------------------------------------------------
 # 경로 / 상수
@@ -388,6 +389,38 @@ class HistoryRegisterDialog(tk.Toplevel):
 
 
 # --------------------------------------------------------------------------------------
+# 셀 내용이 열 너비를 넘칠 때 마우스를 올리면 전체 내용을 보여주는 툴팁 (요청사항)
+# --------------------------------------------------------------------------------------
+class _CellTooltip:
+    def __init__(self):
+        self._win = None
+
+    def show(self, widget, x, y, text):
+        self.hide()
+        win = tk.Toplevel(widget)
+        win.wm_overrideredirect(True)
+        try:
+            win.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        win.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            win, text=text, justify="left", bg="#333333", fg="white",
+            font=("Malgun Gothic", 9), padx=8, pady=5, wraplength=420,
+            relief="solid", bd=1,
+        ).pack()
+        self._win = win
+
+    def hide(self):
+        if self._win is not None:
+            try:
+                self._win.destroy()
+            except tk.TclError:
+                pass
+            self._win = None
+
+
+# --------------------------------------------------------------------------------------
 # 셀 표시(금액/비율 서식) + 더블클릭 편집(선택형/텍스트)이 가능한 Treeview
 # --------------------------------------------------------------------------------------
 class DataTreeview(ttk.Treeview):
@@ -409,6 +442,16 @@ class DataTreeview(ttk.Treeview):
         self._edit_widget = None
         if self.editable:
             self.bind("<Double-1>", self._begin_edit)
+
+        # 열 너비를 넘치는 셀에 마우스를 올리면 전체 내용을 툴팁으로 보여준다 (요청사항).
+        self._tooltip = _CellTooltip()
+        self._hover_cell = None
+        self._hover_after_id = None
+        self._tooltip_font = tkfont.Font(font=("Malgun Gothic", 9))
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress>", lambda e: self._cancel_hover())
+        self.bind("<MouseWheel>", lambda e: self._cancel_hover(), add="+")
 
     # ---------------------------------------------------------------- 데이터 적재
     def set_rows(self, rows):
@@ -462,6 +505,60 @@ class DataTreeview(ttk.Treeview):
             self.insert("", tk.END, iid=str(idx), values=display_row)
         return len(self.get_children())
 
+    # ---------------------------------------------------------------- 셀 툴팁 (요청사항)
+    def _on_motion(self, event):
+        region = self.identify("region", event.x, event.y)
+        if region != "cell":
+            self._cancel_hover()
+            return
+        row_id = self.identify_row(event.y)
+        col_id = self.identify_column(event.x)
+        if not row_id or not col_id:
+            self._cancel_hover()
+            return
+        cell_key = (row_id, col_id)
+        if cell_key == self._hover_cell:
+            return
+        self._cancel_hover()
+        self._hover_cell = cell_key
+        x_root, y_root = event.x_root, event.y_root
+        self._hover_after_id = self.after(450, lambda: self._maybe_show_tooltip(cell_key, x_root, y_root))
+
+    def _on_leave(self, _event=None):
+        self._cancel_hover()
+
+    def _cancel_hover(self):
+        if self._hover_after_id is not None:
+            try:
+                self.after_cancel(self._hover_after_id)
+            except tk.TclError:
+                pass
+            self._hover_after_id = None
+        self._hover_cell = None
+        self._tooltip.hide()
+
+    def _maybe_show_tooltip(self, cell_key, x_root, y_root):
+        if cell_key != self._hover_cell:
+            return
+        row_id, col_id = cell_key
+        if not self.exists(row_id):
+            return
+        col_index = int(col_id.replace("#", "")) - 1
+        if col_index < 0 or col_index >= len(self.headers):
+            return
+        row_index = int(row_id)
+        if row_index >= len(self._raw_rows):
+            return
+        header = self.headers[col_index]
+        display_text = self._format_cell(header, self._raw_rows[row_index][col_index])
+        if not display_text:
+            return
+        col_width = self.column(col_id, "width")
+        text_width = self._tooltip_font.measure(str(display_text)) + 14
+        if text_width <= col_width:
+            return  # 잘리지 않고 다 보이는 셀은 툴팁을 띄우지 않는다.
+        self._tooltip.show(self, x_root + 12, y_root + 18, str(display_text))
+
     # ---------------------------------------------------------------- 편집 (요청사항 4, 5, 6, 11)
     def _close_editor(self):
         if self._edit_widget is not None:
@@ -472,6 +569,7 @@ class DataTreeview(ttk.Treeview):
             self._edit_widget = None
 
     def _begin_edit(self, event):
+        self._cancel_hover()
         if not self.editable:
             return
         if self.identify("region", event.x, event.y) != "cell":
@@ -561,8 +659,8 @@ class PumpPriceApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Pump 판가 계산기 (Python 이식판) - 대외비")
-        self.geometry("1360x860")
-        self.minsize(1000, 660)
+        self.geometry("1360x660")
+        self.minsize(1000, 480)
         self.configure(bg=COLOR_BG)
 
         ensure_utf8_bom(RAWDATA_CSV)
@@ -582,6 +680,8 @@ class PumpPriceApp(tk.Tk):
 
         self._rawdata_win = None
         self._rawdata_tree = None
+        self._rawdata_search_var = None
+        self._rawdata_count_label = None
         self._history_win = None
         self._history_tree = None
         self._history_search_var = None
@@ -590,8 +690,6 @@ class PumpPriceApp(tk.Tk):
         self._setup_style()
         self._build_main()
         self._recalc()
-        # 원가 구조 계산 패널을 포함한 전체 내용이 첫 실행부터 잘리지 않도록 최대화 상태로 띄운다.
-        self.after(0, lambda: maximize_window(self))
 
     # ---------------------------------------------------------------- 스타일 (요청사항 12)
     def _setup_style(self):
@@ -647,14 +745,49 @@ class PumpPriceApp(tk.Tk):
         ).pack(fill="x")
 
         # 상단 툴바 (Rawdata / 이력 새창 버튼) - 요청사항 2
-        toolbar = tk.Frame(self, bg=COLOR_BG)
-        toolbar.pack(fill="x", padx=16, pady=(0, 12))
+        toolbar_wrap = tk.Frame(self, bg=COLOR_BG)
+        toolbar_wrap.pack(fill="x", padx=16, pady=(0, 12))
+
+        toolbar = tk.Frame(toolbar_wrap, bg=COLOR_BG)
+        toolbar.pack(fill="x")
         tk.Label(toolbar, text="", bg=COLOR_BG).pack(side="left", expand=True, fill="x")
         ttk.Button(toolbar, text="🕒  이력 보기", command=self._open_history_window).pack(side="right", padx=(8, 0))
         ttk.Button(toolbar, text="📄  Rawdata 보기", command=self._open_rawdata_window).pack(side="right")
 
-        body = tk.Frame(self, bg=COLOR_BG)
-        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        tk.Label(
+            toolbar_wrap, text="※ Rawdata / 이력은 위 버튼을 눌러 새 창에서 확인합니다.",
+            font=("Malgun Gothic", 9), fg=COLOR_SUBTEXT, bg=COLOR_BG, anchor="e",
+        ).pack(fill="x", pady=(4, 0))
+
+        # 창 높이가 내용보다 작아도(예: 최초 실행 시 1360x660) 잘리지 않고 스크롤로
+        # 전체 내용을 볼 수 있도록 본문을 캔버스로 감싼다.
+        scroll_wrap = tk.Frame(self, bg=COLOR_BG)
+        scroll_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        canvas = tk.Canvas(scroll_wrap, bg=COLOR_BG, highlightthickness=0)
+        vscroll = ttk.Scrollbar(scroll_wrap, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        body = tk.Frame(canvas, bg=COLOR_BG)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _sync_scrollregion(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        body.bind("<Configure>", _sync_scrollregion)
+
+        def _sync_body_width(event):
+            canvas.itemconfig(body_window, width=event.width)
+        canvas.bind("<Configure>", _sync_body_width)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # 메인 창(self) 범위에서만 동작하므로 Rawdata/이력 새 창의 스크롤에는 영향이 없다.
+        self.bind("<MouseWheel>", _on_mousewheel)
+        self.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+        self.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+
         # 판가계산기 패널은 고정 너비(요청사항), 원가 구조 계산 패널이 남는 폭을 모두 차지한다.
         body.columnconfigure(0, weight=0)
         body.columnconfigure(1, weight=1)
@@ -712,11 +845,6 @@ class PumpPriceApp(tk.Tk):
             card, text="이력등록 CLICK!", style="Accent.TButton", command=self._on_register_history,
         ).pack(padx=20, pady=(0, 20), anchor="w")
 
-        tk.Label(
-            card, text="※ Rawdata / 이력은 상단의 [Rawdata 보기] / [이력 보기] 버튼으로 새 창에서 확인합니다.",
-            font=("Malgun Gothic", 9), fg=COLOR_SUBTEXT, bg=COLOR_CARD, anchor="w",
-        ).pack(fill="x", padx=20, pady=(0, 20))
-
         return outer
 
     def _on_material_cost_live(self):
@@ -750,8 +878,11 @@ class PumpPriceApp(tk.Tk):
     def _build_cost_panel(self, master):
         outer, card = self._card(master)
 
-        tk.Label(card, text="원가 구조 계산", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(
-            anchor="w", padx=20, pady=(20, 4))
+        title_row = tk.Frame(card, bg=COLOR_CARD)
+        title_row.pack(fill="x", padx=20, pady=(20, 4))
+        tk.Label(title_row, text="원가 구조 계산", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(side="left")
+        ttk.Button(title_row, text="초기화", command=self._on_reset_cost_ratios).pack(side="right")
+
         tk.Label(card, text="비율(노란 칸)은 직접 입력할 수 있습니다.", font=("Malgun Gothic", 9),
                  bg=COLOR_CARD, fg=COLOR_SUBTEXT).pack(anchor="w", padx=20, pady=(0, 14))
 
@@ -838,6 +969,11 @@ class PumpPriceApp(tk.Tk):
         self.settings[settings_key] = val
         self._recalc()
 
+    def _on_reset_cost_ratios(self):
+        # 값을 바꾸면 기존 trace(_on_ratio_var_changed)가 자동으로 재계산·저장까지 처리한다.
+        self.labor_ratio_var.set(f"{DEFAULT_SETTINGS['labor_expense_ratio']*100:.0f}")
+        self.sga_ratio_var.set(f"{DEFAULT_SETTINGS['sga_ratio']*100:.0f}")
+
     # ---------------------------------------------------------------- Rawdata 새창 (요청사항 2, 4)
     def _open_rawdata_window(self):
         if self._rawdata_win is not None and self._rawdata_win.winfo_exists():
@@ -858,6 +994,18 @@ class PumpPriceApp(tk.Tk):
                  fg=COLOR_SUBTEXT).pack(side="left")
         ttk.Button(top, text="닫기", command=win.destroy).pack(side="right")
         ttk.Button(top, text="새로고침", command=self._reload_rawdata_window).pack(side="right", padx=(0, 8))
+
+        search_bar = tk.Frame(win, bg=COLOR_BG)
+        search_bar.pack(fill="x", padx=18, pady=(0, 12))
+        tk.Label(search_bar, text="🔍 검색", font=FONT_BASE, bg=COLOR_BG, fg=COLOR_TEXT).pack(side="left")
+        self._rawdata_search_var = tk.StringVar()
+        search_entry = tk.Entry(search_bar, textvariable=self._rawdata_search_var, font=FONT_BASE,
+                                 relief="solid", bd=1, highlightthickness=0, width=32)
+        search_entry.pack(side="left", padx=8, ipady=4)
+        self._rawdata_search_var.trace_add("write", lambda *a: self._apply_rawdata_filter())
+        self._rawdata_count_label = tk.Label(search_bar, text="", font=("Malgun Gothic", 9),
+                                              bg=COLOR_BG, fg=COLOR_SUBTEXT)
+        self._rawdata_count_label.pack(side="left", padx=6)
 
         container_outer, container = self._card(win)
         container_outer.pack(fill="both", expand=True, padx=18, pady=(0, 18))
@@ -883,6 +1031,22 @@ class PumpPriceApp(tk.Tk):
             return
         rows = load_csv_rows(RAWDATA_CSV, self.rawdata_headers)
         self._rawdata_tree.set_rows(rows)
+        if self._rawdata_search_var is not None:
+            self._rawdata_search_var.set("")
+        self._update_rawdata_count()
+
+    def _apply_rawdata_filter(self):
+        if self._rawdata_tree is None:
+            return
+        self._rawdata_tree.apply_filter(self._rawdata_search_var.get())
+        self._update_rawdata_count()
+
+    def _update_rawdata_count(self):
+        if self._rawdata_tree is None or self._rawdata_count_label is None:
+            return
+        shown = len(self._rawdata_tree.get_children())
+        total = len(self._rawdata_tree.get_raw_rows())
+        self._rawdata_count_label.config(text=f"{shown} / {total}건 표시")
 
     # ---------------------------------------------------------------- 이력 새창 (요청사항 2, 5, 6, 7, 11)
     def _open_history_window(self, select_no=None):
