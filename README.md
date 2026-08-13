@@ -24,7 +24,7 @@ pump_calc_app/
     ├── rawdata.csv          # 원본 Rawdata(PUMP 판가 DATA) 시트 (과거 실적 71건, 조회 전용)
     ├── history.csv          # 원본 이력 시트 (51건, 이후 등록 건 계속 누적)
     ├── settings.json        # 재료비/영업이익률/비율 등 마지막 입력값 저장 (앱 종료 후에도 유지)
-    └── history_edit_log.txt # 이력 셀 수정 로그 (시간 · No./장비 모델 · 열 · 변경 전→후, 자동 누적)
+    └── history_edit_log.txt # 이력 등록/수정 로그 (시간 · No./장비 모델 · 신규 등록 또는 열별 변경 전→후, 자동 누적)
 ```
 
 `data` 폴더는 프로그램과 함께 이동해야 기존 이력·Rawdata가 유지됩니다.

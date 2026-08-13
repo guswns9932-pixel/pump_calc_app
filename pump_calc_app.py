@@ -293,18 +293,27 @@ def clean_history_csv_if_needed():
         save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, cleaned_rows)
 
 
-def append_history_edit_log(no_value, context_label, header, old_display, new_display):
-    """이력 셀 수정 이력을 텍스트 파일로 남긴다: 시간 + 셀위치(No./열) + 값변경(A→B)."""
+def _write_history_log_line(no_value, context_label, detail_text):
     os.makedirs(DATA_DIR, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     location = f"No.{no_value}" if no_value not in (None, "") else "No.(미확인)"
     if context_label:
         location += f" ({context_label})"
-    old_text = old_display if old_display not in (None, "") else "(빈 값)"
-    new_text = new_display if new_display not in (None, "") else "(빈 값)"
-    line = f"{timestamp} | {location} | {header}: {old_text} → {new_text}\n"
+    line = f"{timestamp} | {location} | {detail_text}\n"
     with open(HISTORY_EDIT_LOG, "a", encoding="utf-8-sig") as f:
         f.write(line)
+
+
+def append_history_edit_log(no_value, context_label, header, old_display, new_display):
+    """이력 셀 수정 이력을 텍스트 파일로 남긴다: 시간 + 셀위치(No./열) + 값변경(A→B)."""
+    old_text = old_display if old_display not in (None, "") else "(빈 값)"
+    new_text = new_display if new_display not in (None, "") else "(빈 값)"
+    _write_history_log_line(no_value, context_label, f"{header}: {old_text} → {new_text}")
+
+
+def append_history_register_log(no_value, context_label, summary):
+    """이력등록으로 새 행이 추가된 것도 동일한 로그 파일에 남긴다 (요청사항)."""
+    _write_history_log_line(no_value, context_label, f"신규 등록: {summary}")
 
 
 # --------------------------------------------------------------------------------------
@@ -1267,6 +1276,13 @@ class PumpPriceApp(tk.Tk):
         ]
         existing_rows.append(new_row)
         save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, existing_rows)
+
+        register_summary = (
+            f"재료비(원가) {fmt_won(material_cost_raw)}원 · 영업이익률 {profit_margin_raw*100:.0f}% · "
+            f"계산금액 {fmt_won(calc_amount_raw)}원"
+        )
+        append_history_register_log(next_no, f"장비 모델: {values['v_model']}" if values["v_model"] else "",
+                                     register_summary)
 
         messagebox.showinfo("이력등록", f"이력이 등록되었습니다. (No. {next_no})")
         # 팝업이 계속 뜨는 대신, 등록된 내용을 바로 이력 창에서 확인할 수 있도록 연다.
