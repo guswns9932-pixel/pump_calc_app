@@ -449,7 +449,8 @@ class _CellTooltip:
 # --------------------------------------------------------------------------------------
 class DataTreeview(ttk.Treeview):
     def __init__(self, master, headers, *, editable=False, choice_map=None,
-                 on_change=None, on_cell_change=None, id_prefix="c", **kwargs):
+                 on_change=None, on_cell_change=None, id_prefix="c",
+                 sort_column=None, sort_desc=False, **kwargs):
         self.headers = list(headers)
         col_ids = [f"{id_prefix}{i}" for i in range(len(self.headers))]
         super().__init__(master, columns=col_ids, show="headings", **kwargs)
@@ -458,6 +459,10 @@ class DataTreeview(ttk.Treeview):
         self.choice_map = choice_map or {}
         self.on_change = on_change
         self.on_cell_change = on_cell_change  # (row_index, header, old_value, new_value)
+        # 조회 시 정렬 기준 (요청사항). _raw_rows 자체의 저장 순서는 그대로 두고
+        # 화면에 보여주는 순서만 바꾸므로, CSV 저장 순서나 No. 자동증가 로직에는 영향이 없다.
+        self.sort_column = sort_column
+        self.sort_desc = sort_desc
         self._raw_rows = []
         self._default_widths = [110] * len(self.headers)
 
@@ -523,7 +528,9 @@ class DataTreeview(ttk.Treeview):
         self._close_editor()
         self.delete(*self.get_children())
         kw = keyword.strip().lower()
-        for idx, row in enumerate(self._raw_rows):
+        indices = self._sorted_indices()
+        for idx in indices:
+            row = self._raw_rows[idx]
             if kw:
                 display_row = [self._format_cell(h, v) for h, v in zip(self.headers, row)]
                 haystack = " ".join(str(v).lower() for v in row) + " " + " ".join(str(v).lower() for v in display_row)
@@ -533,6 +540,21 @@ class DataTreeview(ttk.Treeview):
                 display_row = [self._format_cell(h, v) for h, v in zip(self.headers, row)]
             self.insert("", tk.END, iid=str(idx), values=display_row)
         return len(self.get_children())
+
+    def _sorted_indices(self):
+        indices = list(range(len(self._raw_rows)))
+        if not self.sort_column or self.sort_column not in self.headers:
+            return indices
+        col_index = self.headers.index(self.sort_column)
+
+        def sort_key(i):
+            value = self._raw_rows[i][col_index] if col_index < len(self._raw_rows[i]) else ""
+            n = parse_number(value, None)
+            # 숫자로 읽히는 값은 숫자끼리, 아닌 값은 문자열로 비교해 항상 안정적으로 정렬한다.
+            return (0, n) if n is not None else (1, str(value))
+
+        indices.sort(key=sort_key, reverse=self.sort_desc)
+        return indices
 
     # ---------------------------------------------------------------- 셀 툴팁 (요청사항)
     def _on_motion(self, event):
@@ -1117,7 +1139,8 @@ class PumpPriceApp(tk.Tk):
         tree_frame.pack(fill="both", expand=True, padx=12, pady=12)
 
         tree = DataTreeview(tree_frame, HISTORY_COLUMNS, editable=True, choice_map=HISTORY_CHOICE_MAP,
-                             on_change=self._on_history_changed, on_cell_change=self._on_history_cell_edited)
+                             on_change=self._on_history_changed, on_cell_change=self._on_history_cell_edited,
+                             sort_column="No.", sort_desc=True)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
