@@ -35,6 +35,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 RAWDATA_CSV = os.path.join(DATA_DIR, "rawdata.csv")
 HISTORY_CSV = os.path.join(DATA_DIR, "history.csv")
 SETTINGS_JSON = os.path.join(DATA_DIR, "settings.json")
+HISTORY_EDIT_LOG = os.path.join(DATA_DIR, "history_edit_log.txt")
 
 HISTORY_COLUMNS = [
     "No.", "일시", "제출여부", "지역", "고객구분", "사업부", "대공정", "세부공정",
@@ -292,6 +293,20 @@ def clean_history_csv_if_needed():
         save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, cleaned_rows)
 
 
+def append_history_edit_log(no_value, context_label, header, old_display, new_display):
+    """이력 셀 수정 이력을 텍스트 파일로 남긴다: 시간 + 셀위치(No./열) + 값변경(A→B)."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    location = f"No.{no_value}" if no_value not in (None, "") else "No.(미확인)"
+    if context_label:
+        location += f" ({context_label})"
+    old_text = old_display if old_display not in (None, "") else "(빈 값)"
+    new_text = new_display if new_display not in (None, "") else "(빈 값)"
+    line = f"{timestamp} | {location} | {header}: {old_text} → {new_text}\n"
+    with open(HISTORY_EDIT_LOG, "a", encoding="utf-8-sig") as f:
+        f.write(line)
+
+
 # --------------------------------------------------------------------------------------
 # 계산 로직 (Sheet3 수식과 1:1 대응)
 # --------------------------------------------------------------------------------------
@@ -425,7 +440,7 @@ class _CellTooltip:
 # --------------------------------------------------------------------------------------
 class DataTreeview(ttk.Treeview):
     def __init__(self, master, headers, *, editable=False, choice_map=None,
-                 on_change=None, id_prefix="c", **kwargs):
+                 on_change=None, on_cell_change=None, id_prefix="c", **kwargs):
         self.headers = list(headers)
         col_ids = [f"{id_prefix}{i}" for i in range(len(self.headers))]
         super().__init__(master, columns=col_ids, show="headings", **kwargs)
@@ -433,6 +448,7 @@ class DataTreeview(ttk.Treeview):
         self.editable = editable
         self.choice_map = choice_map or {}
         self.on_change = on_change
+        self.on_cell_change = on_cell_change  # (row_index, header, old_value, new_value)
         self._raw_rows = []
         self._default_widths = [110] * len(self.headers)
 
@@ -488,6 +504,10 @@ class DataTreeview(ttk.Treeview):
             n = parse_number(value, None)
             return fmt_pct(n) if n is not None else value
         return value
+
+    def format_cell(self, header, value):
+        """_format_cell의 공개 버전 (수정 로그 등 외부에서 표시용 서식이 필요할 때 사용)."""
+        return self._format_cell(header, value)
 
     # ---------------------------------------------------------------- 검색 필터 (요청사항 7)
     def apply_filter(self, keyword):
@@ -594,8 +614,11 @@ class DataTreeview(ttk.Treeview):
             self._edit_text(row_id, col_id, row_index, col_index, header, raw_value, x, y, w, h)
 
     def _commit(self, row_id, col_id, row_index, col_index, header, stored_value):
+        old_value = self._raw_rows[row_index][col_index]
         self._raw_rows[row_index][col_index] = stored_value
         self.set(row_id, col_id, self._format_cell(header, stored_value))
+        if self.on_cell_change and str(old_value) != str(stored_value):
+            self.on_cell_change(row_index, header, old_value, stored_value)
         if self.on_change:
             self.on_change()
 
@@ -744,31 +767,32 @@ class PumpPriceApp(tk.Tk):
             anchor="w",
         ).pack(fill="x")
 
-        # 상단 툴바 (Rawdata / 이력 새창 버튼) - 요청사항 2
+        # 상단 툴바 (Rawdata / 이력 새창 버튼) - 요청사항 2. 아래 본문이 내용에 맞춰
+        # 왼쪽으로 타이트하게 배치되므로, 버튼도 오른쪽이 아닌 왼쪽에 맞춘다 (요청사항).
         toolbar_wrap = tk.Frame(self, bg=COLOR_BG)
         toolbar_wrap.pack(fill="x", padx=16, pady=(0, 12))
 
         toolbar = tk.Frame(toolbar_wrap, bg=COLOR_BG)
         toolbar.pack(fill="x")
-        tk.Label(toolbar, text="", bg=COLOR_BG).pack(side="left", expand=True, fill="x")
-        ttk.Button(toolbar, text="🕒  이력 보기", command=self._open_history_window).pack(side="right", padx=(8, 0))
-        ttk.Button(toolbar, text="📄  PUMP 판가 DATA 보기", command=self._open_rawdata_window).pack(side="right")
+        ttk.Button(toolbar, text="📄  PUMP 판가 DATA 보기", command=self._open_rawdata_window).pack(side="left")
+        ttk.Button(toolbar, text="🕒  이력 보기", command=self._open_history_window).pack(side="left", padx=(8, 0))
 
         tk.Label(
             toolbar_wrap, text="※ PUMP 판가 DATA / 이력은 위 버튼을 눌러 새 창에서 확인합니다.",
-            font=("Malgun Gothic", 9), fg=COLOR_SUBTEXT, bg=COLOR_BG, anchor="e",
+            font=("Malgun Gothic", 9), fg=COLOR_SUBTEXT, bg=COLOR_BG, anchor="w",
         ).pack(fill="x", pady=(4, 0))
 
         body = tk.Frame(self, bg=COLOR_BG)
         body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
-        # 판가계산기 패널은 고정 너비(요청사항), 원가 구조 계산 패널이 남는 폭을 모두 차지한다.
+        # 두 패널 모두 고정폭으로 늘리지 않고 내용에 맞춰 타이트하게 감싸서, 원가 구조
+        # 계산 패널 오른쪽에 불필요한 흰 여백이 남지 않게 한다 (요청사항).
         body.columnconfigure(0, weight=0)
-        body.columnconfigure(1, weight=1)
+        body.columnconfigure(1, weight=0)
         body.rowconfigure(0, weight=1)
 
         self._build_calc_panel(body).grid(row=0, column=0, sticky="ns", padx=(0, 8))
-        self._build_cost_panel(body).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self._build_cost_panel(body).grid(row=0, column=1, sticky="ns", padx=(8, 0))
 
     # ---------------------------------------------------------------- 좌측: 판가계산기
     def _build_calc_panel(self, master):
@@ -1072,7 +1096,7 @@ class PumpPriceApp(tk.Tk):
         tree_frame.pack(fill="both", expand=True, padx=12, pady=12)
 
         tree = DataTreeview(tree_frame, HISTORY_COLUMNS, editable=True, choice_map=HISTORY_CHOICE_MAP,
-                             on_change=self._on_history_changed)
+                             on_change=self._on_history_changed, on_cell_change=self._on_history_cell_edited)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -1125,6 +1149,27 @@ class PumpPriceApp(tk.Tk):
             return
         save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, self._history_tree.get_raw_rows())
         self._update_history_count()
+
+    def _on_history_cell_edited(self, row_index, header, old_value, new_value):
+        """이력 셀 수정 시 시간/셀위치/변경내용을 텍스트 로그로 남긴다 (요청사항)."""
+        tree = self._history_tree
+        if tree is None:
+            return
+        raw_rows = tree.get_raw_rows()
+        row = raw_rows[row_index] if 0 <= row_index < len(raw_rows) else None
+        no_value = row[HISTORY_COLUMNS.index("No.")] if row else None
+
+        # No.만으로는 어떤 항목인지 바로 떠올리기 어려우므로, 장비 모델을 함께 남겨
+        # 어떤 이력인지 더 쉽게 알아볼 수 있게 한다.
+        context_label = ""
+        if row:
+            model_value = row[HISTORY_COLUMNS.index("장비 모델")]
+            if model_value:
+                context_label = f"장비 모델: {model_value}"
+
+        old_display = tree.format_cell(header, old_value)
+        new_display = tree.format_cell(header, new_value)
+        append_history_edit_log(no_value, context_label, header, old_display, new_display)
 
     # ---------------------------------------------------------------- 계산 / 재계산
     def _recalc(self):
