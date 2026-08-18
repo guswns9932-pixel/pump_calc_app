@@ -93,9 +93,14 @@ pytest tests/
 
 ```bash
 pip install pyinstaller
+
+# 실행 파일(=작업관리자에 표시되는 프로세스) 이름을 직접 지정
+python build_exe.py --name 우리팀_판가계산기
+
+# 이름을 지정하지 않으면 실행 중에 물어봅니다 (엔터만 누르면 기본값 PumpPriceCalculator 사용)
 python build_exe.py
 ```
 
-완료되면 `dist\PumpPriceCalculator.exe`가 생성됩니다. 이 실행 파일을 `data` 폴더와
+완료되면 `dist\<지정한 이름>.exe`가 생성됩니다. 이 실행 파일을 `data` 폴더와
 같은 위치에 두고 실행하면 됩니다 (`data` 폴더는 exe 안에 포함하지 않으므로, 기존에
 쓰던 `data` 폴더를 그대로 exe 옆에 복사해 오면 이력이 유지됩니다).
