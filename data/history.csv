@@ -1,4 +1,4 @@
-No.,일시,제출여부,지역,고객구분,사업부,대공정,세부공정,장비사,장비 모델,Option,재료비(원가),영업이익률,계산금액,제출금액,채택 현황,PUMP Model,Pump FSC (As Is),Pump FSC (To Be),SEC 담당,LOT 담당,비고
+﻿No.,일시,제출여부,지역,고객구분,사업부,대공정,세부공정,장비사,장비 모델,Option,재료비(원가),영업이익률,계산금액,제출금액,채택 현황,PUMP Model,Pump FSC (As Is),Pump FSC (To Be),SEC 담당,LOT 담당,비고
 1,2022-04-04,제출완료,화성,연구소,메모리,CVD,BPSG,ASM,ㅁㄴㅇㄻ,"Heat Exchanger(19F)+End Cell Purge
 + Flush Purge+N2(100)",,0.5,6987324.24,1950000,투자,DD1055H(274116H),,DD1055(27271WP03),구매그룹 정민화,이기웅,
 2,2022-03-15,제출완료,ALL,연구소,메모리,DIFF,ZRO,LAM,,Shaft(Φ40)+End Cell Purge+N2(100),,0.5,6987324.24,4000000,투자,DD1855(ADD12N532079),,DD1855(ADD12N532259),구매그룹 정민화,이기웅,

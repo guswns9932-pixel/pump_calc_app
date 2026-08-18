@@ -7,31 +7,47 @@ Pump 판가 계산기 (Python 이식판)
 ---------
 1. 원본 엑셀의 계산 로직(수식)을 그대로 유지한다.
      D3(재료비)          = 판가계산기!B5
-     D4(노무비+경비)      = D3 * E4         (E4 = 노무비+경비 비율, 원본 하드코딩 0.2 -> 이번 버전에서 직접 입력 가능)
-     D5(판관비)           = (D3+D4) * E5    (E5 = 판관비 비율,      원본 하드코딩 0.3 -> 이번 버전에서 직접 입력 가능)
+     D4(노무비+경비)      = D3 * E4         (E4 = 노무비+경비 비율, 원본 하드코딩 0.2 -> 직접 입력 가능)
+     D5(판관비)           = (D3+D4) * E5    (E5 = 판관비 비율,      원본 하드코딩 0.3 -> 직접 입력 가능)
      D6(영업이익)         = (D3+D4+D5) * E6 (E6 = 영업이익률,       원본부터 직접 입력 가능 = 판가계산기!C5)
      D7(적정 판가)        = D3+D4+D5+D6
-2. '이력등록' 버튼 클릭 시 원본 VBA(Module1.bas RegisterHistory)와 동일한 순서 / 동일한 항목으로
-   정보를 입력받아 '이력' 시트에 동일한 규칙(No. 자동증가, 오늘 날짜, 계산금액 자동기록, 채택 현황='대기')으로 기록한다.
-3. Rawdata(과거 실적 73건)는 원본과 동일하게 조회용으로 제공한다.
-4. UI는 엑셀의 탭(시트) 구조를 그대로 재현한다: 판가계산기 / Sheet3 / Rawdata / 이력
+2. '이력등록' 버튼 클릭 시 원본 VBA(Module1.bas RegisterHistory)와 동일한 항목을 입력받아
+   '이력' 데이터에 동일한 규칙(No. 자동증가, 오늘 날짜, 계산금액 자동기록, 채택 현황='대기')으로 기록한다.
+   (단, 입력 UX는 팝업 15개 연속 대신 한 화면 입력폼으로 개선)
+3. Rawdata(과거 실적)는 조회 전용으로 제공한다 (수정 불가).
+4. UI는 알파버전 대비 더 직관적이고 세련되게 재구성한다 (요청사항 반영).
 """
 
 import os
+import re
+import sys
 import csv
+import glob
 import json
+import shutil
+import zipfile
 import datetime
+import xml.sax.saxutils as xml_escape
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 
 # --------------------------------------------------------------------------------------
 # 경로 / 상수
 # --------------------------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # PyInstaller 등으로 exe 패키징된 경우, 임시 압축 해제 폴더가 아니라 exe가 실제로
+    # 놓인 폴더를 기준으로 삼아야 data 폴더가 실행할 때마다 유지된다.
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 RAWDATA_CSV = os.path.join(DATA_DIR, "rawdata.csv")
 HISTORY_CSV = os.path.join(DATA_DIR, "history.csv")
 SETTINGS_JSON = os.path.join(DATA_DIR, "settings.json")
+HISTORY_EDIT_LOG = os.path.join(DATA_DIR, "history_edit_log.txt")
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+MAX_HISTORY_BACKUPS = 20
 
 HISTORY_COLUMNS = [
     "No.", "일시", "제출여부", "지역", "고객구분", "사업부", "대공정", "세부공정",
@@ -52,23 +68,33 @@ CHOICE_장비사 = ["GCS", "TES", "WONIK_IPS", "LAM", "ASM", "AMAT", "ULVAC",
 # 원본 VBA RegisterHistory 의 입력 순서와 동일한 순서로 정의
 # type: "choice"(목록에서 선택) / "text"(자유 입력)
 WIZARD_FIELDS = [
-    ("v_progress", "제출여부를 선택하세요", "choice", CHOICE_제출여부),
-    ("v_region", "지역을 선택하세요", "choice", CHOICE_지역),
-    ("v_cust", "고객구분을 선택하세요", "choice", CHOICE_고객구분),
-    ("v_div", "사업부를 선택하세요", "choice", CHOICE_사업부),
-    ("v_process", "대공정을 선택하세요", "choice", CHOICE_대공정),
-    ("v_detail", "세부공정을 입력하세요", "text", None),
-    ("v_maker", "장비사를 선택하세요", "choice", CHOICE_장비사),
-    ("v_model", "장비 모델을 입력하세요", "text", None),
-    ("v_content", "Option을 입력하세요", "text", None),
-    ("v_submit", "제출금액을 입력하세요", "text", None),
-    ("v_modle", "Pump Model을 입력하세요", "text", None),
-    ("v_fscAsIs", "Pump FSC (As Is)를 입력하세요", "text", None),
-    ("v_fscToBe", "Pump FSC (To Be)를 입력하세요", "text", None),
-    ("v_sec", "SEC 담당자를 입력하세요", "text", None),
-    ("v_lot", "LOT 담당자를 입력하세요", "text", None),
-    ("v_note", "비고를 입력하세요", "text", None),
+    ("v_progress", "제출여부", "choice", CHOICE_제출여부),
+    ("v_region", "지역", "choice", CHOICE_지역),
+    ("v_cust", "고객구분", "choice", CHOICE_고객구분),
+    ("v_div", "사업부", "choice", CHOICE_사업부),
+    ("v_process", "대공정", "choice", CHOICE_대공정),
+    ("v_detail", "세부공정", "text", None),
+    ("v_maker", "장비사", "choice", CHOICE_장비사),
+    ("v_model", "장비 모델", "text", None),
+    ("v_content", "Option", "text", None),
+    ("v_submit", "제출금액", "text", None),
+    ("v_modle", "PUMP Model", "text", None),
+    ("v_fscAsIs", "Pump FSC (As Is)", "text", None),
+    ("v_fscToBe", "Pump FSC (To Be)", "text", None),
+    ("v_sec", "SEC 담당", "text", None),
+    ("v_lot", "LOT 담당", "text", None),
+    ("v_note", "비고", "text", None),
 ]
+
+# 이력등록 마법사에서 "목록 선택"으로 입력되는 열 -> 더블클릭 수정 시에도 동일한 선택지를 보여준다.
+HISTORY_CHOICE_MAP = {
+    "제출여부": CHOICE_제출여부,
+    "지역": CHOICE_지역,
+    "고객구분": CHOICE_고객구분,
+    "사업부": CHOICE_사업부,
+    "대공정": CHOICE_대공정,
+    "장비사": CHOICE_장비사,
+}
 
 DEFAULT_SETTINGS = {
     "material_cost": 1000000,      # 판가계산기!B5  재료비(원가)
@@ -79,39 +105,114 @@ DEFAULT_SETTINGS = {
 
 WON_FMT = "{:,.0f}"
 
+# --------------------------------------------------------------------------------------
+# 색상 / 폰트 (UI 테마)
+# --------------------------------------------------------------------------------------
+COLOR_BG = "#F3F5F9"
+COLOR_CARD = "#FFFFFF"
+COLOR_BORDER = "#E1E5EE"
+COLOR_TEXT = "#20242C"
+COLOR_SUBTEXT = "#6B7280"
+COLOR_ACCENT = "#3B6FE0"
+COLOR_ACCENT_DARK = "#2E58B8"
+COLOR_ACCENT_SOFT = "#EAF1FF"
+COLOR_HEADER_BG = "#EEF1F8"
+COLOR_INPUT_BG = "#FFFDE9"
+
+FONT_BASE = ("Malgun Gothic", 10)
+FONT_BOLD = ("Malgun Gothic", 10, "bold")
+FONT_TITLE = ("Malgun Gothic", 14, "bold")
+FONT_SUBTITLE = ("Malgun Gothic", 11, "bold")
+FONT_MONO = ("Consolas", 11)
+
 
 def fmt_won(v):
     try:
-        return WON_FMT.format(v)
+        return WON_FMT.format(float(v))
     except (TypeError, ValueError):
         return str(v)
 
 
 def fmt_pct(v):
     try:
-        return f"{v * 100:.1f}%"
+        return f"{float(v) * 100:.1f}%"
     except (TypeError, ValueError):
         return str(v)
 
 
 def _num_to_cell(v):
     """엑셀 셀처럼 정수는 정수로, 소수는 그대로 저장 (콤마 등 서식 문자는 넣지 않음)."""
+    if v is None:
+        return ""
     if float(v).is_integer():
         return int(v)
     return round(float(v), 6)
 
 
 def parse_number(s, default=0.0):
-    """콤마, 공백, '원', '%' 등이 섞여 있어도 숫자만 파싱."""
+    """콤마, 공백, 줄바꿈, '원', '%' 등이 섞여 있어도 숫자만 파싱. 실패 시 default 반환."""
     if s is None:
         return default
-    s = str(s).strip().replace(",", "").replace("원", "").replace("%", "")
-    if s == "":
+    text = str(s).replace("\xa0", " ").strip()
+    text = text.replace(",", "").replace("원", "").replace("%", "").replace(" ", "")
+    if text == "":
         return default
     try:
-        return float(s)
+        return float(text)
     except ValueError:
         return default
+
+
+# --------------------------------------------------------------------------------------
+# 텍스트 정리 (줄바꿈 -> 공백)
+# --------------------------------------------------------------------------------------
+_NEWLINE_RE = re.compile(r"[\r\n]+")
+_MULTI_SPACE_RE = re.compile(r"[ \t ]+")
+
+
+def clean_text(value):
+    """셀 안에 줄바꿈이 있으면 공백으로 치환하고 연속 공백을 정리한다."""
+    if value is None:
+        return value
+    s = str(value).replace("\xa0", " ")
+    s = _NEWLINE_RE.sub(" ", s)
+    s = _MULTI_SPACE_RE.sub(" ", s)
+    return s.strip()
+
+
+# --------------------------------------------------------------------------------------
+# 열(컬럼) 종류 판별: 금액 / 비율(%) / 일반 텍스트
+# --------------------------------------------------------------------------------------
+MONEY_KEYWORDS = ("재료비", "노무비", "경비", "원가", "판관비", "판가", "금액")
+PERCENT_KEYWORDS = ("퍼센트", "이익률")
+
+
+_PAREN_RE = re.compile(r"\([^)]*\)")
+
+
+def classify_column(header):
+    h = (header or "").replace("\n", " ")
+    # 괄호 안 설명("BEP 판가 (영업이익률 20%)"의 "영업이익률 20%" 등)은 열 자체의 성격이
+    # 아니라 산정 근거 설명이므로 분류 판단에서 제외한다.
+    core = _PAREN_RE.sub(" ", h)
+    if any(k in core for k in PERCENT_KEYWORDS):
+        return "percent"
+    if any(k in core for k in MONEY_KEYWORDS):
+        return "money"
+    return "text"
+
+
+def compute_default_widths(headers, raw_rows, sample=300, min_w=70, max_w=260, base_pad=28, char_w=9):
+    """헤더/내용 길이를 기준으로 열 기본 너비를 계산한다 (새로고침 시 이 값으로 초기화)."""
+    widths = []
+    for i, h in enumerate(headers):
+        header_text = (h or "").replace("\n", " ")
+        max_len = len(header_text)
+        for row in raw_rows[:sample]:
+            if i < len(row) and row[i]:
+                max_len = max(max_len, len(str(row[i])))
+        widths.append(min(max_w, max(min_w, base_pad + max_len * char_w)))
+    return widths
 
 
 # --------------------------------------------------------------------------------------
@@ -134,10 +235,28 @@ def save_settings(settings):
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
 
+
+# CSV_ENCODING: "utf-8-sig"(BOM 포함)로 읽고 쓴다. BOM이 없는 순수 UTF-8 CSV를 엑셀에서
+# 직접 열면 한글이 깨져 보이는데(엑셀이 시스템 기본 코드페이지로 잘못 해석), BOM을 붙이면
+# 엑셀이 UTF-8로 정확히 인식한다. utf-8-sig로 읽으면 BOM 유무와 상관없이 항상 올바르게 읽힌다.
+CSV_ENCODING = "utf-8-sig"
+
+
+def load_csv_header(path):
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", newline="", encoding=CSV_ENCODING) as f:
+        reader = csv.reader(f)
+        try:
+            return next(reader)
+        except StopIteration:
+            return []
+
+
 def load_csv_rows(path, columns):
     if not os.path.exists(path):
         return []
-    with open(path, "r", newline="", encoding="utf-8") as f:
+    with open(path, "r", newline="", encoding=CSV_ENCODING) as f:
         reader = csv.reader(f)
         rows = list(reader)
     if not rows:
@@ -146,11 +265,198 @@ def load_csv_rows(path, columns):
 
 
 def save_csv_rows(path, columns, rows):
+    """임시 파일에 먼저 쓴 뒤 교체(os.replace)하는 원자적 저장. 저장 도중 프로그램이
+    강제 종료되거나 디스크 오류가 나도 기존 파일이 반쯤 쓰인 상태로 깨지지 않는다
+    (요청사항: 저장 전 안전망)."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", newline="", encoding=CSV_ENCODING) as f:
         writer = csv.writer(f)
         writer.writerow(columns)
         writer.writerows(rows)
+    os.replace(tmp_path, path)
+
+
+def backup_history_csv():
+    """이력 CSV를 덮어쓰기 전에 타임스탬프가 붙은 복사본을 남겨 두어, 잘못된 수정이나
+    삭제를 사람이 직접 되돌릴 수 있게 한다. 오래된 백업은 최근 MAX_HISTORY_BACKUPS개만
+    남기고 자동으로 정리한다 (요청사항: 저장 전 백업)."""
+    if not os.path.exists(HISTORY_CSV):
+        return
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup_path = os.path.join(BACKUP_DIR, f"history_{timestamp}.csv")
+    try:
+        shutil.copy2(HISTORY_CSV, backup_path)
+    except OSError:
+        return  # 백업 실패는 저장 자체를 막지 않는다
+    backups = sorted(glob.glob(os.path.join(BACKUP_DIR, "history_*.csv")))
+    for old_backup in backups[:-MAX_HISTORY_BACKUPS] if len(backups) > MAX_HISTORY_BACKUPS else []:
+        try:
+            os.remove(old_backup)
+        except OSError:
+            pass
+
+
+def save_history_csv(rows):
+    """이력 저장은 항상 이 함수를 통해서만 이루어져, 저장 직전 백업이 빠지지 않게 한다."""
+    backup_history_csv()
+    save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, rows)
+
+
+def ensure_utf8_bom(path):
+    """기존에 BOM 없이 저장된 CSV 파일을 엑셀에서 열어도 한글이 깨지지 않도록,
+    내용은 그대로 두고 UTF-8 BOM만 추가해 둔다."""
+    if not os.path.exists(path):
+        return
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw.startswith(b"\xef\xbb\xbf") or not raw:
+        return
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    with open(path, "w", newline="", encoding=CSV_ENCODING) as f:
+        f.write(text)
+
+
+def clean_history_csv_if_needed():
+    """이력 CSV에 남아있는 줄바꿈을 공백으로 정리해서 저장해 둔다 (요청사항 8)."""
+    rows = load_csv_rows(HISTORY_CSV, HISTORY_COLUMNS)
+    if not rows:
+        return
+    changed = False
+    cleaned_rows = []
+    for row in rows:
+        new_row = [clean_text(v) for v in row]
+        if new_row != row:
+            changed = True
+        cleaned_rows.append(new_row)
+    if changed:
+        save_history_csv(cleaned_rows)
+
+
+def _write_history_log_line(no_value, context_label, detail_text):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    location = f"No.{no_value}" if no_value not in (None, "") else "No.(미확인)"
+    if context_label:
+        location += f" ({context_label})"
+    line = f"{timestamp} | {location} | {detail_text}\n"
+    with open(HISTORY_EDIT_LOG, "a", encoding="utf-8-sig") as f:
+        f.write(line)
+
+
+def append_history_edit_log(no_value, context_label, header, old_display, new_display):
+    """이력 셀 수정 이력을 텍스트 파일로 남긴다: 시간 + 셀위치(No./열) + 값변경(A→B)."""
+    old_text = old_display if old_display not in (None, "") else "(빈 값)"
+    new_text = new_display if new_display not in (None, "") else "(빈 값)"
+    _write_history_log_line(no_value, context_label, f"{header}: {old_text} → {new_text}")
+
+
+def append_history_register_log(no_value, context_label, summary):
+    """이력등록으로 새 행이 추가된 것도 동일한 로그 파일에 남긴다 (요청사항)."""
+    _write_history_log_line(no_value, context_label, f"신규 등록: {summary}")
+
+
+def append_history_delete_log(no_value, context_label, summary):
+    """이력 삭제도 동일한 로그 파일에 남긴다 (요청사항)."""
+    _write_history_log_line(no_value, context_label, f"삭제됨: {summary}")
+
+
+# --------------------------------------------------------------------------------------
+# 엑셀(.xlsx) 내보내기 — 외부 라이브러리 없이 표준 라이브러리(zipfile)만으로 최소한의
+# 유효한 .xlsx 파일을 직접 생성한다 (요청사항: 엑셀 내보내기, 외부 라이브러리 설치 불필요
+# 원칙 유지).
+# --------------------------------------------------------------------------------------
+_XLSX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>"""
+
+_XLSX_ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+
+_XLSX_WORKBOOK_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+
+_XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="2">
+<font><sz val="11"/><name val="Calibri"/></font>
+<font><b/><sz val="11"/><name val="Calibri"/></font>
+</fonts>
+<fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="2">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+</cellXfs>
+</styleSheet>"""
+
+
+def _xlsx_col_letter(n):
+    """0부터 시작하는 열 번호를 엑셀 열 문자(A, B, ..., Z, AA, ...)로 변환."""
+    letters = ""
+    n += 1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def _xlsx_workbook_xml(sheet_name):
+    safe_name = xml_escape.escape(sheet_name)[:31] or "Sheet1"
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets><sheet name="{safe_name}" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+
+
+def _xlsx_sheet_xml(headers, rows):
+    """모든 셀을 inlineStr(문자열)로 기록한다 — 앱 화면에 보이는 서식(콤마/퍼센트)
+    그대로를 내보내므로 숫자 서식 관련 예외 상황을 피할 수 있어 가장 안전하다."""
+    parts = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             '<sheetData>']
+
+    def cell_xml(col_idx, row_num, text, style=0):
+        ref = f"{_xlsx_col_letter(col_idx)}{row_num}"
+        escaped = xml_escape.escape(str(text) if text is not None else "")
+        style_attr = f' s="{style}"' if style else ""
+        return f'<c r="{ref}" t="inlineStr"{style_attr}><is><t xml:space="preserve">{escaped}</t></is></c>'
+
+    header_cells = "".join(cell_xml(c, 1, h, style=1) for c, h in enumerate(headers))
+    parts.append(f'<row r="1">{header_cells}</row>')
+    for r, row in enumerate(rows, start=2):
+        row_cells = "".join(cell_xml(c, r, v) for c, v in enumerate(row))
+        parts.append(f'<row r="{r}">{row_cells}</row>')
+    parts.append("</sheetData></worksheet>")
+    return "".join(parts)
+
+
+def export_rows_to_xlsx(path, sheet_name, headers, rows):
+    """표준 라이브러리(zipfile)만으로 최소한의 유효한 .xlsx 파일을 생성한다."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _XLSX_CONTENT_TYPES)
+        zf.writestr("_rels/.rels", _XLSX_ROOT_RELS)
+        zf.writestr("xl/workbook.xml", _xlsx_workbook_xml(sheet_name))
+        zf.writestr("xl/_rels/workbook.xml.rels", _XLSX_WORKBOOK_RELS)
+        zf.writestr("xl/styles.xml", _XLSX_STYLES)
+        zf.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml(headers, rows))
 
 
 # --------------------------------------------------------------------------------------
@@ -166,121 +472,392 @@ def compute_price(material_cost, labor_ratio, sga_ratio, profit_margin):
 
 
 # --------------------------------------------------------------------------------------
-# 이력등록 마법사 (원본 VBA 팝업 시퀀스 재현)
+# 창 유틸
 # --------------------------------------------------------------------------------------
-class WizardStepDialog(tk.Toplevel):
-    """한 번에 한 항목씩 입력받는 팝업. 원본 frmSelect / frmTextInput 과 동일한 흐름."""
+def maximize_window(win):
+    """새 창을 화면 전체 크기로 띄운다 (요청사항 2)."""
+    win.update_idletasks()
+    # 창관리자가 없거나 "zoomed"/"-zoomed"가 무시되는 환경에서도 항상 화면 크기를
+    # 보장하도록, 실제 화면 크기로 우선 지정해 둔 뒤 OS 기본 최대화를 추가로 시도한다.
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    win.geometry(f"{sw}x{sh}+0+0")
+    try:
+        win.state("zoomed")
+        return
+    except tk.TclError:
+        pass
+    try:
+        win.attributes("-zoomed", True)
+    except tk.TclError:
+        pass
 
-    def __init__(self, parent, prompt, kind, choices=None):
+
+# --------------------------------------------------------------------------------------
+# 이력등록 입력폼 (원본 VBA 팝업 15개 연속 -> 한 화면 입력폼으로 개선, 요청사항 3)
+# --------------------------------------------------------------------------------------
+class HistoryRegisterDialog(tk.Toplevel):
+    def __init__(self, parent, summary_text):
         super().__init__(parent)
         self.title("이력등록")
+        self.configure(bg=COLOR_BG)
         self.resizable(False, False)
         self.result = None
-        self.cancelled = True
         self.transient(parent)
         self.grab_set()
 
-        tk.Label(self, text=prompt, font=("Malgun Gothic", 11)).pack(anchor="w", padx=16, pady=(16, 8))
+        tk.Label(self, text="이력등록 정보 입력", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_TEXT).pack(
+            anchor="w", padx=24, pady=(22, 4))
+        tk.Label(self, text=summary_text, font=FONT_BASE, bg=COLOR_BG, fg=COLOR_SUBTEXT,
+                 justify="left").pack(anchor="w", padx=24, pady=(0, 14))
 
-        if kind == "choice":
-            self.listbox = tk.Listbox(self, height=min(8, len(choices)), exportselection=False, font=("Malgun Gothic", 10))
-            for item in choices:
-                self.listbox.insert(tk.END, item)
-            self.listbox.selection_set(0)
-            self.listbox.pack(padx=16, fill="x")
-            self.listbox.focus_set()
-            self.listbox.bind("<Return>", lambda e: self._ok())
-            self.listbox.bind("<Double-Button-1>", lambda e: self._ok())
-            self.entry = None
-        else:
-            self.entry_var = tk.StringVar()
-            self.entry = tk.Entry(self, textvariable=self.entry_var, width=42, font=("Malgun Gothic", 10))
-            self.entry.pack(padx=16, fill="x")
-            self.entry.focus_set()
-            self.entry.bind("<Return>", lambda e: self._ok())
-            self.listbox = None
+        grid = tk.Frame(self, bg=COLOR_BG)
+        grid.pack(padx=24)
 
-        btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=12)
-        tk.Button(btn_frame, text="확인", width=10, command=self._ok).pack(side="left", padx=4)
-        tk.Button(btn_frame, text="취소", width=10, command=self._cancel).pack(side="left", padx=4)
+        self._vars = {}
+        pairs = [WIZARD_FIELDS[i:i + 2] for i in range(0, len(WIZARD_FIELDS), 2)]
+        for r, pair in enumerate(pairs):
+            for c, field in enumerate(pair):
+                key, label, kind, choices = field
+                cell = tk.Frame(grid, bg=COLOR_BG)
+                cell.grid(row=r, column=c, padx=10, pady=6, sticky="w")
+                tk.Label(cell, text=label, font=FONT_BOLD, bg=COLOR_BG, fg=COLOR_TEXT).pack(anchor="w")
+                if kind == "choice":
+                    var = tk.StringVar(value=choices[0])
+                    combo = ttk.Combobox(cell, textvariable=var, values=choices, state="readonly",
+                                          width=21, font=FONT_BASE)
+                    combo.pack(anchor="w", pady=(3, 0))
+                else:
+                    var = tk.StringVar()
+                    entry = tk.Entry(cell, textvariable=var, width=24, font=FONT_BASE,
+                                      relief="solid", bd=1, highlightthickness=0)
+                    entry.pack(anchor="w", pady=(3, 0), ipady=3)
+                self._vars[key] = var
+
+        btns = tk.Frame(self, bg=COLOR_BG)
+        btns.pack(pady=(6, 22))
+        ttk.Button(btns, text="등록", style="Accent.TButton", command=self._ok).pack(side="left", padx=6)
+        ttk.Button(btns, text="취소", command=self._cancel).pack(side="left", padx=6)
 
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.update_idletasks()
         x = parent.winfo_rootx() + 60
-        y = parent.winfo_rooty() + 60
+        y = parent.winfo_rooty() + 40
         self.geometry(f"+{x}+{y}")
         self.wait_window(self)
 
     def _ok(self):
-        if self.listbox is not None:
-            sel = self.listbox.curselection()
-            self.result = self.listbox.get(sel[0]) if sel else ""
-        else:
-            self.result = self.entry_var.get().strip()
-        self.cancelled = False
+        self.result = {k: clean_text(v.get()).strip() for k, v in self._vars.items()}
         self.destroy()
 
     def _cancel(self):
-        self.cancelled = True
+        self.result = None
         self.destroy()
 
 
-def run_register_history_wizard(parent, current_price):
-    """원본 VBA RegisterHistory 서브루틴 재현. 취소 시 None 반환(전체 취소)."""
-    values = {}
-    for key, prompt, kind, choices in WIZARD_FIELDS:
-        dlg = WizardStepDialog(parent, prompt, kind, choices)
-        if dlg.cancelled:
-            return None  # If gLastCancelled Then Exit Sub 와 동일
-        values[key] = dlg.result
-    return values
+# --------------------------------------------------------------------------------------
+# 셀 내용이 열 너비를 넘칠 때 마우스를 올리면 전체 내용을 보여주는 툴팁 (요청사항)
+# --------------------------------------------------------------------------------------
+class _CellTooltip:
+    def __init__(self):
+        self._win = None
+
+    def show(self, widget, x, y, text):
+        self.hide()
+        win = tk.Toplevel(widget)
+        win.wm_overrideredirect(True)
+        try:
+            win.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        win.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            win, text=text, justify="left", bg="#333333", fg="white",
+            font=("Malgun Gothic", 9), padx=8, pady=5, wraplength=420,
+            relief="solid", bd=1,
+        ).pack()
+        self._win = win
+
+    def hide(self):
+        if self._win is not None:
+            try:
+                self._win.destroy()
+            except tk.TclError:
+                pass
+            self._win = None
 
 
 # --------------------------------------------------------------------------------------
-# 셀 더블클릭 편집이 가능한 Treeview (엑셀처럼 셀을 직접 수정)
+# 셀 표시(금액/비율 서식) + 더블클릭 편집(선택형/텍스트)이 가능한 Treeview
 # --------------------------------------------------------------------------------------
-class EditableTreeview(ttk.Treeview):
-    def __init__(self, master, columns, on_cell_edited=None, **kwargs):
-        super().__init__(master, columns=columns, show="headings", **kwargs)
-        self._columns = columns
-        self._on_cell_edited = on_cell_edited
-        self.bind("<Double-1>", self._begin_edit)
-        self._edit_entry = None
+class DataTreeview(ttk.Treeview):
+    def __init__(self, master, headers, *, editable=False, choice_map=None,
+                 on_change=None, on_cell_change=None, id_prefix="c",
+                 sort_column=None, sort_desc=False, **kwargs):
+        self.headers = list(headers)
+        col_ids = [f"{id_prefix}{i}" for i in range(len(self.headers))]
+        super().__init__(master, columns=col_ids, show="headings", **kwargs)
+        self.col_ids = col_ids
+        self.editable = editable
+        self.choice_map = choice_map or {}
+        self.on_change = on_change
+        self.on_cell_change = on_cell_change  # (row_index, header, old_value, new_value)
+        # 조회 시 정렬 기준 (요청사항). _raw_rows 자체의 저장 순서는 그대로 두고
+        # 화면에 보여주는 순서만 바꾸므로, CSV 저장 순서나 No. 자동증가 로직에는 영향이 없다.
+        self.sort_column = sort_column
+        self.sort_desc = sort_desc
+        self._raw_rows = []
+        self._last_keyword = ""
+        self._default_widths = [110] * len(self.headers)
 
-    def _begin_edit(self, event):
+        for cid, header in zip(self.col_ids, self.headers):
+            self.heading(cid, text=header.replace("\n", " "))
+
+        self._edit_widget = None
+        if self.editable:
+            self.bind("<Double-1>", self._begin_edit)
+
+        # 열 너비를 넘치는 셀에 마우스를 올리면 전체 내용을 툴팁으로 보여준다 (요청사항).
+        self._tooltip = _CellTooltip()
+        self._hover_cell = None
+        self._hover_after_id = None
+        self._tooltip_font = tkfont.Font(font=("Malgun Gothic", 9))
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress>", lambda e: self._cancel_hover())
+        self.bind("<MouseWheel>", lambda e: self._cancel_hover(), add="+")
+
+    # ---------------------------------------------------------------- 데이터 적재
+    def set_rows(self, rows):
+        width = len(self.headers)
+        self._raw_rows = [(list(r) + [""] * width)[:width] for r in rows]
+        for row in self._raw_rows:
+            for i, v in enumerate(row):
+                row[i] = clean_text(v)
+        self._default_widths = compute_default_widths(self.headers, self._raw_rows)
+        self.apply_default_column_widths()
+        self.apply_filter("")
+
+    def get_raw_rows(self):
+        return [list(r) for r in self._raw_rows]
+
+    # ---------------------------------------------------------------- 열 너비 (요청사항 9, 10)
+    def apply_default_column_widths(self):
+        for cid, header, width in zip(self.col_ids, self.headers, self._default_widths):
+            kind = classify_column(header)
+            anchor = "e" if kind in ("money", "percent") else "w"
+            # stretch=False: 한 열을 늘리거나 줄여도 옆 열이 밀리거나 당겨지지 않고
+            # 가로 스크롤로 처리된다.
+            self.column(cid, width=width, minwidth=40, stretch=False, anchor=anchor)
+
+    # ---------------------------------------------------------------- 서식(콤마/퍼센트)
+    def _format_cell(self, header, value):
+        if value in (None, ""):
+            return ""
+        kind = classify_column(header)
+        if kind == "money":
+            n = parse_number(value, None)
+            return fmt_won(n) if n is not None else value
+        if kind == "percent":
+            n = parse_number(value, None)
+            return fmt_pct(n) if n is not None else value
+        return value
+
+    def format_cell(self, header, value):
+        """_format_cell의 공개 버전 (수정 로그 등 외부에서 표시용 서식이 필요할 때 사용)."""
+        return self._format_cell(header, value)
+
+    # ---------------------------------------------------------------- 검색 필터 (요청사항 7)
+    def apply_filter(self, keyword):
+        self._close_editor()
+        self.delete(*self.get_children())
+        self._last_keyword = keyword
+        kw = keyword.strip().lower()
+        indices = self._sorted_indices()
+        for idx in indices:
+            row = self._raw_rows[idx]
+            if kw:
+                display_row = [self._format_cell(h, v) for h, v in zip(self.headers, row)]
+                haystack = " ".join(str(v).lower() for v in row) + " " + " ".join(str(v).lower() for v in display_row)
+                if kw not in haystack:
+                    continue
+            else:
+                display_row = [self._format_cell(h, v) for h, v in zip(self.headers, row)]
+            self.insert("", tk.END, iid=str(idx), values=display_row)
+        return len(self.get_children())
+
+    # ---------------------------------------------------------------- 행 삭제 (요청사항)
+    def delete_rows_by_index(self, indices):
+        """row_index(=현재 iid) 목록을 받아 _raw_rows에서 제거하고 화면을 다시 그린다.
+        삭제된 (원래 index, 그 행의 값) 목록을 오름차순으로 반환한다 (로그 기록용)."""
+        unique_indices = sorted(set(i for i in indices if 0 <= i < len(self._raw_rows)))
+        removed = [(i, self._raw_rows[i]) for i in unique_indices]
+        for i in reversed(unique_indices):
+            del self._raw_rows[i]
+        self.apply_filter(getattr(self, "_last_keyword", ""))
+        if self.on_change:
+            self.on_change()
+        return removed
+
+    def _sorted_indices(self):
+        indices = list(range(len(self._raw_rows)))
+        if not self.sort_column or self.sort_column not in self.headers:
+            return indices
+        col_index = self.headers.index(self.sort_column)
+
+        def sort_key(i):
+            value = self._raw_rows[i][col_index] if col_index < len(self._raw_rows[i]) else ""
+            n = parse_number(value, None)
+            # 숫자로 읽히는 값은 숫자끼리, 아닌 값은 문자열로 비교해 항상 안정적으로 정렬한다.
+            return (0, n) if n is not None else (1, str(value))
+
+        indices.sort(key=sort_key, reverse=self.sort_desc)
+        return indices
+
+    # ---------------------------------------------------------------- 셀 툴팁 (요청사항)
+    def _on_motion(self, event):
         region = self.identify("region", event.x, event.y)
         if region != "cell":
+            self._cancel_hover()
+            return
+        row_id = self.identify_row(event.y)
+        col_id = self.identify_column(event.x)
+        if not row_id or not col_id:
+            self._cancel_hover()
+            return
+        cell_key = (row_id, col_id)
+        if cell_key == self._hover_cell:
+            return
+        self._cancel_hover()
+        self._hover_cell = cell_key
+        x_root, y_root = event.x_root, event.y_root
+        self._hover_after_id = self.after(450, lambda: self._maybe_show_tooltip(cell_key, x_root, y_root))
+
+    def _on_leave(self, _event=None):
+        self._cancel_hover()
+
+    def _cancel_hover(self):
+        if self._hover_after_id is not None:
+            try:
+                self.after_cancel(self._hover_after_id)
+            except tk.TclError:
+                pass
+            self._hover_after_id = None
+        self._hover_cell = None
+        self._tooltip.hide()
+
+    def _maybe_show_tooltip(self, cell_key, x_root, y_root):
+        if cell_key != self._hover_cell:
+            return
+        row_id, col_id = cell_key
+        if not self.exists(row_id):
+            return
+        col_index = int(col_id.replace("#", "")) - 1
+        if col_index < 0 or col_index >= len(self.headers):
+            return
+        row_index = int(row_id)
+        if row_index >= len(self._raw_rows):
+            return
+        header = self.headers[col_index]
+        display_text = self._format_cell(header, self._raw_rows[row_index][col_index])
+        if not display_text:
+            return
+        col_width = self.column(col_id, "width")
+        text_width = self._tooltip_font.measure(str(display_text)) + 14
+        if text_width <= col_width:
+            return  # 잘리지 않고 다 보이는 셀은 툴팁을 띄우지 않는다.
+        self._tooltip.show(self, x_root + 12, y_root + 18, str(display_text))
+
+    # ---------------------------------------------------------------- 편집 (요청사항 4, 5, 6, 11)
+    def _close_editor(self):
+        if self._edit_widget is not None:
+            try:
+                self._edit_widget.destroy()
+            except tk.TclError:
+                pass
+            self._edit_widget = None
+
+    def _begin_edit(self, event):
+        self._cancel_hover()
+        if not self.editable:
+            return
+        if self.identify("region", event.x, event.y) != "cell":
             return
         row_id = self.identify_row(event.y)
         col_id = self.identify_column(event.x)
         if not row_id or not col_id:
             return
+        self._close_editor()
         col_index = int(col_id.replace("#", "")) - 1
-        x, y, w, h = self.bbox(row_id, col_id)
-        value = self.set(row_id, self._columns[col_index])
+        header = self.headers[col_index]
+        row_index = int(row_id)
+        raw_value = self._raw_rows[row_index][col_index]
+        bbox = self.bbox(row_id, col_id)
+        if not bbox:
+            return
+        x, y, w, h = bbox
 
-        if self._edit_entry is not None:
-            self._edit_entry.destroy()
+        if header in self.choice_map:
+            self._edit_choice(row_id, col_id, row_index, col_index, header, raw_value, x, y, w, h)
+        else:
+            self._edit_text(row_id, col_id, row_index, col_index, header, raw_value, x, y, w, h)
+
+    def _commit(self, row_id, col_id, row_index, col_index, header, stored_value):
+        old_value = self._raw_rows[row_index][col_index]
+        self._raw_rows[row_index][col_index] = stored_value
+        self.set(row_id, col_id, self._format_cell(header, stored_value))
+        if self.on_cell_change and str(old_value) != str(stored_value):
+            self.on_cell_change(row_index, header, old_value, stored_value)
+        if self.on_change:
+            self.on_change()
+
+    def _edit_choice(self, row_id, col_id, row_index, col_index, header, raw_value, x, y, w, h):
+        # 이력등록 CLICK 시 목록에서 선택했던 열은, 더블클릭 수정 시에도 동일한 선택지를 보여준다.
+        choices = self.choice_map[header]
+        var = tk.StringVar(value=str(raw_value) if raw_value else choices[0])
+        combo = ttk.Combobox(self, textvariable=var, values=choices, state="readonly", font=("Malgun Gothic", 9))
+        combo.place(x=x, y=y, width=w, height=h)
+        self._edit_widget = combo
+        combo.focus_set()
+
+        def commit(_e=None):
+            self._commit(row_id, col_id, row_index, col_index, header, var.get())
+            self._close_editor()
+
+        combo.bind("<<ComboboxSelected>>", commit)
+        combo.bind("<FocusOut>", lambda e: self._close_editor())
+        combo.bind("<Escape>", lambda e: self._close_editor())
+
+    def _edit_text(self, row_id, col_id, row_index, col_index, header, raw_value, x, y, w, h):
+        kind = classify_column(header)
+        if kind == "percent":
+            n = parse_number(raw_value, None)
+            edit_value = f"{n * 100:.0f}" if n is not None else ""
+        else:
+            edit_value = "" if raw_value is None else str(raw_value)
 
         entry = tk.Entry(self, font=("Malgun Gothic", 9))
-        entry.insert(0, value)
+        entry.insert(0, edit_value)
         entry.select_range(0, tk.END)
         entry.place(x=x, y=y, width=w, height=h)
         entry.focus_set()
-        self._edit_entry = entry
+        self._edit_widget = entry
 
-        def commit(_event=None):
-            new_value = entry.get()
-            self.set(row_id, self._columns[col_index], new_value)
-            entry.destroy()
-            self._edit_entry = None
-            if self._on_cell_edited:
-                self._on_cell_edited(row_id, self._columns[col_index], new_value)
+        def commit(_e=None):
+            new_text = clean_text(entry.get())
+            if kind == "percent":
+                n = parse_number(new_text, None)
+                stored = _num_to_cell(n / 100.0) if n is not None else new_text
+            elif kind == "money":
+                n = parse_number(new_text, None)
+                stored = _num_to_cell(n) if n is not None else new_text
+            else:
+                stored = new_text
+            self._commit(row_id, col_id, row_index, col_index, header, stored)
+            self._close_editor()
 
-        def cancel(_event=None):
-            entry.destroy()
-            self._edit_entry = None
+        def cancel(_e=None):
+            self._close_editor()
 
         entry.bind("<Return>", commit)
         entry.bind("<FocusOut>", commit)
@@ -294,96 +871,182 @@ class PumpPriceApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Pump 판가 계산기 (Python 이식판) - 대외비")
-        self.geometry("1180x680")
+        self.geometry("1200x660")
+        self.minsize(1000, 480)
+        self.configure(bg=COLOR_BG)
+
+        ensure_utf8_bom(RAWDATA_CSV)
+        ensure_utf8_bom(HISTORY_CSV)
+        clean_history_csv_if_needed()
 
         self.settings = load_settings()
 
         self.material_cost_var = tk.StringVar(value=fmt_won(self.settings["material_cost"]))
-        self.profit_margin_var = tk.StringVar(value=f"{self.settings['profit_margin']*100:.1f}")
-        self.labor_ratio_var = tk.StringVar(value=f"{self.settings['labor_expense_ratio']*100:.1f}")
-        self.sga_ratio_var = tk.StringVar(value=f"{self.settings['sga_ratio']*100:.1f}")
+        self.profit_margin_var = tk.StringVar(value=f"{self.settings['profit_margin']*100:.0f}")
+        self.labor_ratio_var = tk.StringVar(value=f"{self.settings['labor_expense_ratio']*100:.0f}")
+        self.sga_ratio_var = tk.StringVar(value=f"{self.settings['sga_ratio']*100:.0f}")
 
-        self.calc_labels = {}  # Sheet3 계산결과 표시용 라벨 저장
+        self.calc_labels = {}  # 원가구조(구 Sheet3) 계산결과 표시용 라벨 저장
 
-        self._build_notebook()
+        self.rawdata_headers = load_csv_header(RAWDATA_CSV)
+
+        self._rawdata_win = None
+        self._rawdata_tree = None
+        self._rawdata_search_var = None
+        self._rawdata_count_label = None
+        self._history_win = None
+        self._history_tree = None
+        self._history_search_var = None
+        self._history_count_label = None
+
+        self._setup_style()
+        self._build_main()
         self._recalc()
-        self._load_rawdata()
-        self._load_history()
 
-    # ---------------------------------------------------------------- UI 골격
-    def _build_notebook(self):
+    # ---------------------------------------------------------------- 스타일 (요청사항 12)
+    def _setup_style(self):
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("Treeview.Heading", font=("Malgun Gothic", 9, "bold"))
-        style.configure("Treeview", font=("Malgun Gothic", 9), rowheight=22)
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True)
+        style.configure(".", background=COLOR_BG, font=FONT_BASE)
+        style.configure("TFrame", background=COLOR_BG)
+        style.configure("Card.TFrame", background=COLOR_CARD)
 
-        self.tab_calc = tk.Frame(self.notebook, bg="white")
-        self.tab_sheet3 = tk.Frame(self.notebook, bg="white")
-        self.tab_rawdata = tk.Frame(self.notebook, bg="white")
-        self.tab_history = tk.Frame(self.notebook, bg="white")
+        style.configure("Treeview", font=("Malgun Gothic", 9), rowheight=24,
+                         background=COLOR_CARD, fieldbackground=COLOR_CARD, borderwidth=0)
+        style.configure("Treeview.Heading", font=("Malgun Gothic", 9, "bold"),
+                         background=COLOR_HEADER_BG, foreground=COLOR_TEXT, relief="flat")
+        style.map("Treeview", background=[("selected", COLOR_ACCENT_SOFT)],
+                  foreground=[("selected", COLOR_TEXT)])
 
-        self.notebook.add(self.tab_calc, text="판가계산기")
-        self.notebook.add(self.tab_sheet3, text="Sheet3")
-        self.notebook.add(self.tab_rawdata, text="Rawdata")
-        self.notebook.add(self.tab_history, text="이력")
+        style.configure("TButton", font=FONT_BASE, padding=(12, 7))
+        style.map("TButton", background=[("active", "#E4E8F1")])
 
-        self._build_tab_calc()
-        self._build_tab_sheet3()
-        self._build_tab_rawdata()
-        self._build_tab_history()
+        style.configure("Accent.TButton", font=FONT_BOLD, padding=(16, 9),
+                         background=COLOR_ACCENT, foreground="white")
+        style.map("Accent.TButton",
+                  background=[("active", COLOR_ACCENT_DARK), ("pressed", COLOR_ACCENT_DARK)],
+                  foreground=[("disabled", "#AAAAAA")])
 
-    # ---------------------------------------------------------------- 판가계산기 탭
-    def _build_tab_calc(self):
-        f = self.tab_calc
+        style.configure("Compact.TButton", font=("Malgun Gothic", 9), padding=(6, 3))
 
-        banner = tk.Label(
-            f, text="재료비(원가) / 영업이익률을 입력 → 이력등록 CLICK!",
-            bg="#FFFF00", fg="#FF0000", font=("Malgun Gothic", 12, "bold"), pady=10,
-        )
-        banner.pack(fill="x", padx=12, pady=(12, 20))
+        style.configure("TCombobox", padding=4)
+        style.configure("TNotebook", background=COLOR_BG, borderwidth=0)
 
-        grid = tk.Frame(f, bg="white")
-        grid.pack(padx=12, anchor="w")
+    def _card(self, master, width=None, **pack_kwargs):
+        outer = tk.Frame(master, bg=COLOR_BORDER)
+        if width is not None:
+            outer.configure(width=width)
+            outer.pack_propagate(False)
+        card = tk.Frame(outer, bg=COLOR_CARD)
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+        if pack_kwargs:
+            outer.pack(**pack_kwargs)
+        return outer, card
 
-        header_style = dict(font=("Malgun Gothic", 10, "bold"), bg="#D9D9D9",
-                             relief="solid", bd=1, width=16, height=2)
-        entry_style = dict(font=("Malgun Gothic", 11), relief="solid", bd=1, width=16, justify="right")
+    # ---------------------------------------------------------------- 전체 레이아웃
+    def _build_main(self):
+        # 상단 안내 배너
+        banner = tk.Frame(self, bg=COLOR_ACCENT_SOFT)
+        banner.pack(fill="x", padx=16, pady=(16, 10))
+        tk.Label(
+            banner, text="재료비(원가) / 영업이익률을 입력하면 자동 계산됩니다  →  이력등록 CLICK!",
+            bg=COLOR_ACCENT_SOFT, fg=COLOR_ACCENT_DARK, font=FONT_SUBTITLE, pady=12, padx=16,
+            anchor="w",
+        ).pack(fill="x")
 
-        tk.Label(grid, text="재료비(원가)", **header_style).grid(row=0, column=0)
-        tk.Label(grid, text="영업이익률", **header_style).grid(row=0, column=1)
+        # 상단 툴바 (Rawdata / 이력 새창 버튼) - 요청사항 2. 아래 본문이 내용에 맞춰
+        # 왼쪽으로 타이트하게 배치되므로, 버튼도 오른쪽이 아닌 왼쪽에 맞춘다 (요청사항).
+        toolbar_wrap = tk.Frame(self, bg=COLOR_BG)
+        toolbar_wrap.pack(fill="x", padx=16, pady=(0, 12))
 
-        e1 = tk.Entry(grid, textvariable=self.material_cost_var, **entry_style)
-        e1.grid(row=1, column=0, ipady=6)
+        toolbar = tk.Frame(toolbar_wrap, bg=COLOR_BG)
+        toolbar.pack(fill="x")
+        ttk.Button(toolbar, text="📄  PUMP 판가 DATA 보기", command=self._open_rawdata_window).pack(side="left")
+        ttk.Button(toolbar, text="🕒  이력 보기", command=self._open_history_window).pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            toolbar_wrap, text="※ PUMP 판가 DATA / 이력은 위 버튼을 눌러 새 창에서 확인합니다.",
+            font=("Malgun Gothic", 9), fg=COLOR_SUBTEXT, bg=COLOR_BG, anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+
+        body = tk.Frame(self, bg=COLOR_BG)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        # 두 패널 모두 고정폭으로 늘리지 않고 내용에 맞춰 타이트하게 감싸서, 원가 구조
+        # 계산 패널 오른쪽에 불필요한 흰 여백이 남지 않게 한다 (요청사항).
+        body.columnconfigure(0, weight=0)
+        body.columnconfigure(1, weight=0)
+        body.rowconfigure(0, weight=1)
+
+        self._build_calc_panel(body).grid(row=0, column=0, sticky="ns", padx=(0, 8))
+        self._build_cost_panel(body).grid(row=0, column=1, sticky="ns", padx=(8, 0))
+
+    # ---------------------------------------------------------------- 좌측: 판가계산기
+    def _build_calc_panel(self, master):
+        # 고정 너비를 주지 않고 내용(표+버튼)에 맞춰 패널이 저절로 타이트하게 감싸도록 한다
+        # (요청사항: 표~버튼 너비와 계산 결과 상자 너비를 맞추고 남는 여백을 없앤다).
+        outer, card = self._card(master)
+
+        tk.Label(card, text="판가계산기", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(
+            anchor="w", padx=20, pady=(20, 14))
+
+        grid = tk.Frame(card, bg=COLOR_CARD)
+        grid.pack(padx=20, pady=(0, 20), anchor="w")
+
+        header_style = dict(font=FONT_BOLD, bg=COLOR_HEADER_BG, fg=COLOR_TEXT,
+                             relief="flat", width=12, height=2)
+        tk.Label(grid, text="재료비(원가)", **header_style).grid(row=0, column=0, padx=(0, 1), pady=(0, 1), sticky="nsew")
+        tk.Label(grid, text="영업이익률", **header_style).grid(row=0, column=1, pady=(0, 1), sticky="nsew")
+
+        e1 = tk.Entry(grid, textvariable=self.material_cost_var, font=("Malgun Gothic", 12),
+                      relief="solid", bd=1, highlightthickness=0, width=12, justify="right")
+        e1.grid(row=1, column=0, ipady=8, padx=(0, 1))
         e1.bind("<FocusOut>", lambda e: self._on_material_cost_changed())
         e1.bind("<Return>", lambda e: self._on_material_cost_changed())
+        # 입력하는 동안에도(글자마다) 즉시 재계산되도록 trace를 건다. 콤마 서식은
+        # 포커스를 벗어날 때만(_on_material_cost_changed) 적용해 타이핑을 방해하지 않는다.
+        self.material_cost_var.trace_add("write", lambda *a: self._on_material_cost_live())
 
-        pct_frame = tk.Frame(grid)
-        pct_frame.grid(row=1, column=1, ipady=6)
-        e2 = tk.Entry(pct_frame, textvariable=self.profit_margin_var, font=("Malgun Gothic", 11),
-                      relief="solid", bd=1, width=13, justify="right")
-        e2.pack(side="left")
-        tk.Label(pct_frame, text="%", font=("Malgun Gothic", 11)).pack(side="left")
+        pct_frame = tk.Frame(grid, bg=COLOR_CARD, highlightbackground="#C9CEDA",
+                              highlightthickness=1, bd=0)
+        pct_frame.grid(row=1, column=1, ipady=8, sticky="nsew")
+        e2 = tk.Entry(pct_frame, textvariable=self.profit_margin_var, font=("Malgun Gothic", 12),
+                      relief="flat", bd=0, width=7, justify="right")
+        e2.pack(side="left", padx=(8, 0), fill="y")
+        tk.Label(pct_frame, text="%", font=("Malgun Gothic", 12), bg=COLOR_CARD).pack(side="left", padx=(2, 8))
         e2.bind("<FocusOut>", lambda e: self._on_profit_margin_changed())
         e2.bind("<Return>", lambda e: self._on_profit_margin_changed())
+        self.profit_margin_var.trace_add("write", lambda *a: self._on_profit_margin_live())
 
-        result_frame = tk.LabelFrame(f, text="계산 결과 (Sheet3 연동)", font=("Malgun Gothic", 10),
-                                      bg="white", padx=16, pady=12)
-        result_frame.pack(fill="x", padx=12, pady=20)
-        self.summary_label = tk.Label(result_frame, text="", justify="left",
-                                       font=("Consolas", 11), bg="white", anchor="w")
-        self.summary_label.pack(fill="x")
+        # 이력등록 버튼을 재료비/영업이익률 표 오른쪽에 붙여 배치한다 (요청사항).
+        register_btn = ttk.Button(
+            grid, text="이력등록\nCLICK!", style="Accent.TButton", command=self._on_register_history,
+        )
+        register_btn.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(12, 0))
 
-        tk.Button(
-            f, text="이력등록 CLICK!", font=("Malgun Gothic", 12, "bold"),
-            bg="#FFC000", activebackground="#FFD966", padx=20, pady=10,
-            command=self._on_register_history,
-        ).pack(padx=12, pady=10, anchor="w")
+        # 계산 결과 상자를 표/버튼과 같은 grid의 3개 열에 걸쳐 배치해서, 위쪽 표~버튼의
+        # 총 너비와 정확히 같은 너비를 갖도록 한다 (요청사항).
+        result_outer = tk.Frame(grid, bg=COLOR_HEADER_BG)
+        result_outer.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(20, 0))
+        tk.Label(result_outer, text="계산 결과", font=FONT_SUBTITLE, bg=COLOR_HEADER_BG,
+                 fg=COLOR_TEXT, anchor="w").pack(fill="x", padx=16, pady=(14, 4))
+        self.summary_label = tk.Label(result_outer, text="", justify="left", anchor="w",
+                                       font=FONT_MONO, bg=COLOR_HEADER_BG, fg=COLOR_TEXT)
+        self.summary_label.pack(fill="x", padx=16, pady=(0, 16))
+
+        return outer
+
+    def _on_material_cost_live(self):
+        # 타이핑 중(엔터/포커스아웃 전)에도 거의 실시간으로 재계산만 반영한다 (요청사항).
+        val = parse_number(self.material_cost_var.get(), None)
+        if val is None:
+            return
+        self.settings["material_cost"] = val
+        self._recalc()
 
     def _on_material_cost_changed(self):
         val = parse_number(self.material_cost_var.get(), self.settings["material_cost"])
@@ -391,84 +1054,122 @@ class PumpPriceApp(tk.Tk):
         self.material_cost_var.set(fmt_won(val))
         self._recalc()
 
+    def _on_profit_margin_live(self):
+        val = parse_number(self.profit_margin_var.get(), None)
+        if val is None:
+            return
+        self.settings["profit_margin"] = val / 100.0
+        self._recalc()
+
     def _on_profit_margin_changed(self):
         val = parse_number(self.profit_margin_var.get(), self.settings["profit_margin"] * 100) / 100.0
         self.settings["profit_margin"] = val
-        self.profit_margin_var.set(f"{val*100:.1f}")
+        self.profit_margin_var.set(f"{val*100:.0f}")
         self._recalc()
 
-    # ---------------------------------------------------------------- Sheet3 탭
-    def _build_tab_sheet3(self):
-        f = self.tab_sheet3
-        tk.Label(f, text="원가 구조 계산 (비율은 직접 입력 가능)", font=("Malgun Gothic", 12, "bold"),
-                 bg="white").pack(anchor="w", padx=12, pady=(12, 6))
+    # ---------------------------------------------------------------- 우측: 원가 구조 (구 Sheet3, 요청사항 1)
+    COST_PANEL_WIDTH = 670
 
-        grid = tk.Frame(f, bg="white")
-        grid.pack(padx=12, pady=8, anchor="w")
+    def _build_cost_panel(self, master):
+        outer, card = self._card(master, width=self.COST_PANEL_WIDTH)
 
+        tk.Label(card, text="원가 구조 계산", font=FONT_TITLE, bg=COLOR_CARD, fg=COLOR_TEXT).pack(
+            anchor="w", padx=20, pady=(20, 4))
+        tk.Label(card, text="비율(노란 칸)은 직접 입력할 수 있습니다.", font=("Malgun Gothic", 9),
+                 bg=COLOR_CARD, fg=COLOR_SUBTEXT).pack(anchor="w", padx=20, pady=(0, 14))
+
+        grid = tk.Frame(card, bg=COLOR_CARD)
+        grid.pack(padx=20, pady=(0, 8), fill="x")
+
+        # 초기화 버튼을 "기본값 산정 근거" 열(마지막 열) 바로 위에 배치한다 (요청사항).
+        ttk.Button(grid, text="초기화", style="Compact.TButton",
+                   command=self._on_reset_cost_ratios).grid(
+            row=0, column=5, sticky="e", pady=(0, 4))
+
+        # 열 너비를 문자수로 임의 지정하지 않고, 짧은 열(분류/구분/금액/비율)은 내용
+        # 그대로 한 줄에 맞춰 자동으로 최소 폭을 갖게 하고, 긴 설명이 들어가는 열(비율
+        # 상세/근거)만 wraplength로 2줄까지 줄바꿈되게 해서 잘리는 글자 없이 타이트하게
+        # 맞춘다 (요청사항: 여백 축소).
         headers = ["분류", "구분", "금액", "비율", "비율 상세", "기본값 산정 근거"]
+        WRAP_COLS = (4, 5)
+        WRAP_PX = 100
         for c, h in enumerate(headers):
-            tk.Label(grid, text=h, font=("Malgun Gothic", 9, "bold"), bg="#D9D9D9",
-                     relief="solid", bd=1, width=16, height=2).grid(row=0, column=c, sticky="nsew")
+            wrap = WRAP_PX if c in WRAP_COLS else 0
+            tk.Label(grid, text=h, font=("Malgun Gothic", 9, "bold"), bg=COLOR_HEADER_BG, fg=COLOR_TEXT,
+                     relief="flat", height=2, wraplength=wrap, justify="center").grid(
+                row=1, column=c, sticky="nsew", padx=(0 if c == 0 else 1, 0), pady=(0, 1))
 
-        def cell(row, col, text, editable_var=None, width=16, bold=False):
+        def cell(row, col, text, editable_var=None, bold=False):
             if editable_var is not None:
-                e = tk.Entry(grid, textvariable=editable_var, width=width, justify="center",
-                             relief="solid", bd=1, font=("Malgun Gothic", 10), bg="#FFFFCC")
-                e.grid(row=row, column=col, sticky="nsew", ipady=4)
+                e = tk.Entry(grid, textvariable=editable_var, width=6, justify="center",
+                             relief="solid", bd=1, highlightthickness=0, font=("Malgun Gothic", 10),
+                             bg=COLOR_INPUT_BG)
+                e.grid(row=row, column=col, sticky="nsew", ipady=5, padx=(0 if col == 0 else 1, 0), pady=1)
                 return e
-            lbl = tk.Label(grid, text=text, width=width, relief="solid", bd=1,
-                            font=("Malgun Gothic", 10, "bold" if bold else "normal"), bg="white")
-            lbl.grid(row=row, column=col, sticky="nsew", ipady=4)
+            # 표의 모든 값은 가운데 정렬한다 (요청사항).
+            wrap = WRAP_PX if col in WRAP_COLS else 0
+            lbl = tk.Label(grid, text=text, relief="flat",
+                            font=("Malgun Gothic", 10, "bold" if bold else "normal"),
+                            bg=COLOR_CARD if not bold else COLOR_HEADER_BG, fg=COLOR_TEXT,
+                            wraplength=wrap, justify="center", anchor="center", padx=6)
+            lbl.grid(row=row, column=col, sticky="nsew", ipady=5, padx=(0 if col == 0 else 1, 0), pady=1)
             return lbl
 
-        # Row1: 원가 / 재료비
-        cell(1, 0, "원가")
-        cell(1, 1, "재료비")
-        self.calc_labels["재료비_금액"] = cell(1, 2, "-")
-        cell(1, 3, "-")
-        cell(1, 4, "연구소 및 구매팀")
-        cell(1, 5, "-")
+        # Row2: 원가 / 재료비
+        cell(2, 0, "원가")
+        cell(2, 1, "재료비")
+        self.calc_labels["재료비_금액"] = cell(2, 2, "-")
+        cell(2, 3, "-")
+        cell(2, 4, "연구소 및 구매팀")
+        cell(2, 5, "-")
 
-        # Row2: 노무비+경비 (비율 EDITABLE)
-        cell(2, 0, "")
-        cell(2, 1, "노무비+경비")
-        self.calc_labels["노무비_금액"] = cell(2, 2, "-")
-        cell(2, 3, "", editable_var=self.labor_ratio_var)
-        self.calc_labels["노무비_상세"] = cell(2, 4, "-")
-        cell(2, 5, "Rawdata 기준 평균값")
+        # Row3: 노무비+경비 (비율 EDITABLE)
+        cell(3, 0, "")
+        cell(3, 1, "노무비+경비")
+        self.calc_labels["노무비_금액"] = cell(3, 2, "-")
+        cell(3, 3, "", editable_var=self.labor_ratio_var)
+        self.calc_labels["노무비_상세"] = cell(3, 4, "-")
+        cell(3, 5, "PUMP 판가 DATA 기준 평균값")
 
-        # Row3: 판관비 (비율 EDITABLE)
-        cell(3, 0, "판매관리비")
-        cell(3, 1, "판관비")
-        self.calc_labels["판관비_금액"] = cell(3, 2, "-")
-        cell(3, 3, "", editable_var=self.sga_ratio_var)
-        self.calc_labels["판관비_상세"] = cell(3, 4, "-")
-        cell(3, 5, "제조업 평균값")
+        # Row4: 판관비 (비율 EDITABLE)
+        cell(4, 0, "판매관리비")
+        cell(4, 1, "판관비")
+        self.calc_labels["판관비_금액"] = cell(4, 2, "-")
+        cell(4, 3, "", editable_var=self.sga_ratio_var)
+        self.calc_labels["판관비_상세"] = cell(4, 4, "-")
+        cell(4, 5, "제조업 평균값")
 
-        # Row4: 영업이익 (비율은 판가계산기 탭과 연동, 읽기전용)
-        cell(4, 0, "이익")
-        cell(4, 1, "영업이익")
-        self.calc_labels["영업이익_금액"] = cell(4, 2, "-")
-        self.calc_labels["영업이익_비율"] = cell(4, 3, "-")
-        self.calc_labels["영업이익_상세"] = cell(4, 4, "-")
-        cell(4, 5, "-")
+        # Row5: 영업이익 (비율은 판가계산기 입력값과 연동, 읽기전용)
+        cell(5, 0, "이익")
+        cell(5, 1, "영업이익")
+        self.calc_labels["영업이익_금액"] = cell(5, 2, "-")
+        self.calc_labels["영업이익_비율"] = cell(5, 3, "-")
+        self.calc_labels["영업이익_상세"] = cell(5, 4, "-")
+        cell(5, 5, "-")
 
-        # Row5: 적정 판가
-        cell(5, 0, "적정 판가", bold=True)
-        cell(5, 1, "")
-        self.calc_labels["적정판가"] = cell(5, 2, "-", bold=True)
-        cell(5, 3, "")
-        cell(5, 4, "")
-        cell(5, 5, "")
+        # Row6: 적정 판가
+        cell(6, 0, "적정 판가", bold=True)
+        cell(6, 1, "", bold=True)
+        self.calc_labels["적정판가"] = cell(6, 2, "-", bold=True)
+        cell(6, 3, "", bold=True)
+        cell(6, 4, "", bold=True)
+        cell(6, 5, "", bold=True)
 
-        self.labor_ratio_var.trace_add("write", lambda *a: self._on_ratio_var_changed("labor_expense_ratio", self.labor_ratio_var))
-        self.sga_ratio_var.trace_add("write", lambda *a: self._on_ratio_var_changed("sga_ratio", self.sga_ratio_var))
+        # 표가 패널(670px) 가로 폭을 꽉 채우도록 남는 공간을 열들에 비례 배분한다 (요청사항).
+        for c in range(6):
+            grid.columnconfigure(c, weight=1)
+
+        self.labor_ratio_var.trace_add(
+            "write", lambda *a: self._on_ratio_var_changed("labor_expense_ratio", self.labor_ratio_var))
+        self.sga_ratio_var.trace_add(
+            "write", lambda *a: self._on_ratio_var_changed("sga_ratio", self.sga_ratio_var))
 
         tk.Label(
-            f, text="※ 노무비+경비 비율, 판관비 비율 칸(노란색)에 직접 숫자를 입력하면 즉시 재계산됩니다. (예: 20 → 20%)",
-            font=("Malgun Gothic", 9), fg="#555555", bg="white",
-        ).pack(anchor="w", padx=12, pady=(8, 0))
+            card, text="※ 노무비+경비 비율, 판관비 비율 칸(노란색)에 숫자를 입력하면 즉시 재계산됩니다. (예: 20 → 20%)",
+            font=("Malgun Gothic", 9), fg=COLOR_SUBTEXT, bg=COLOR_CARD, anchor="w", justify="left",
+        ).pack(anchor="w", padx=20, pady=(10, 20), fill="x")
+
+        return outer
 
     def _on_ratio_var_changed(self, settings_key, var):
         val = parse_number(var.get(), self.settings[settings_key] * 100)
@@ -476,90 +1177,259 @@ class PumpPriceApp(tk.Tk):
         self.settings[settings_key] = val
         self._recalc()
 
-    # ---------------------------------------------------------------- Rawdata 탭
-    def _build_tab_rawdata(self):
-        f = self.tab_rawdata
-        tk.Label(f, text="Rawdata (과거 실적 조회용 - 셀 더블클릭으로 수정 가능)",
-                 font=("Malgun Gothic", 11, "bold"), bg="white").pack(anchor="w", padx=12, pady=(12, 6))
+    def _on_reset_cost_ratios(self):
+        # 값을 바꾸면 기존 trace(_on_ratio_var_changed)가 자동으로 재계산·저장까지 처리한다.
+        self.labor_ratio_var.set(f"{DEFAULT_SETTINGS['labor_expense_ratio']*100:.0f}")
+        self.sga_ratio_var.set(f"{DEFAULT_SETTINGS['sga_ratio']*100:.0f}")
 
-        container = tk.Frame(f)
-        container.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+    # ---------------------------------------------------------------- Rawdata 새창 (요청사항 2, 4)
+    def _open_rawdata_window(self):
+        if self._rawdata_win is not None and self._rawdata_win.winfo_exists():
+            self._rawdata_win.lift()
+            self._rawdata_win.focus_force()
+            return
 
-        self.rawdata_columns = []
-        if os.path.exists(RAWDATA_CSV):
-            with open(RAWDATA_CSV, encoding="utf-8") as fp:
-                self.rawdata_columns = next(csv.reader(fp))
+        win = tk.Toplevel(self)
+        win.title("PUMP 판가 DATA - 조회 전용")
+        win.configure(bg=COLOR_BG)
+        maximize_window(win)
+        self._rawdata_win = win
 
-        self.rawdata_tree = EditableTreeview(
-            container, columns=self.rawdata_columns, on_cell_edited=self._on_rawdata_edited,
-        )
-        for col in self.rawdata_columns:
-            self.rawdata_tree.heading(col, text=col)
-            self.rawdata_tree.column(col, width=100, anchor="center")
+        top = tk.Frame(win, bg=COLOR_BG)
+        top.pack(fill="x", padx=18, pady=14)
+        tk.Label(top, text="PUMP 판가 DATA", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_TEXT).pack(side="left")
+        tk.Label(top, text="  조회 전용 (수정 불가)", font=("Malgun Gothic", 10), bg=COLOR_BG,
+                 fg=COLOR_SUBTEXT).pack(side="left")
+        ttk.Button(top, text="닫기", command=win.destroy).pack(side="right")
+        ttk.Button(top, text="새로고침", command=self._reload_rawdata_window).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="엑셀로 내보내기", command=self._export_rawdata_to_excel).pack(side="right", padx=(0, 8))
 
-        vsb = ttk.Scrollbar(container, orient="vertical", command=self.rawdata_tree.yview)
-        hsb = ttk.Scrollbar(container, orient="horizontal", command=self.rawdata_tree.xview)
-        self.rawdata_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        search_bar = tk.Frame(win, bg=COLOR_BG)
+        search_bar.pack(fill="x", padx=18, pady=(0, 12))
+        tk.Label(search_bar, text="🔍 검색", font=FONT_BASE, bg=COLOR_BG, fg=COLOR_TEXT).pack(side="left")
+        self._rawdata_search_var = tk.StringVar()
+        search_entry = tk.Entry(search_bar, textvariable=self._rawdata_search_var, font=FONT_BASE,
+                                 relief="solid", bd=1, highlightthickness=0, width=32)
+        search_entry.pack(side="left", padx=8, ipady=4)
+        self._rawdata_search_var.trace_add("write", lambda *a: self._apply_rawdata_filter())
+        self._rawdata_count_label = tk.Label(search_bar, text="", font=("Malgun Gothic", 9),
+                                              bg=COLOR_BG, fg=COLOR_SUBTEXT)
+        self._rawdata_count_label.pack(side="left", padx=6)
 
-        self.rawdata_tree.grid(row=0, column=0, sticky="nsew")
+        container_outer, container = self._card(win)
+        container_outer.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+
+        tree_frame = tk.Frame(container, bg=COLOR_CARD)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        tree = DataTreeview(tree_frame, self.rawdata_headers, editable=False)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        container.grid_rowconfigure(0, weight=1)
-        container.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
 
-    def _load_rawdata(self):
-        for item in self.rawdata_tree.get_children():
-            self.rawdata_tree.delete(item)
-        rows = load_csv_rows(RAWDATA_CSV, self.rawdata_columns)
-        for row in rows:
-            self.rawdata_tree.insert("", tk.END, values=row)
+        self._rawdata_tree = tree
+        self._reload_rawdata_window()
 
-    def _on_rawdata_edited(self, row_id, col, value):
-        self._persist_treeview(self.rawdata_tree, self.rawdata_columns, RAWDATA_CSV)
+    def _reload_rawdata_window(self):
+        if self._rawdata_tree is None:
+            return
+        rows = load_csv_rows(RAWDATA_CSV, self.rawdata_headers)
+        self._rawdata_tree.set_rows(rows)
+        if self._rawdata_search_var is not None:
+            self._rawdata_search_var.set("")
+        self._update_rawdata_count()
 
-    # ---------------------------------------------------------------- 이력 탭
-    def _build_tab_history(self):
-        f = self.tab_history
-        top = tk.Frame(f, bg="white")
-        top.pack(fill="x", padx=12, pady=(12, 6))
-        tk.Label(top, text="이력 (셀 더블클릭으로 직접 수정 가능)",
-                 font=("Malgun Gothic", 11, "bold"), bg="white").pack(side="left")
-        tk.Button(top, text="새로고침", command=self._load_history).pack(side="right")
+    def _apply_rawdata_filter(self):
+        if self._rawdata_tree is None:
+            return
+        self._rawdata_tree.apply_filter(self._rawdata_search_var.get())
+        self._update_rawdata_count()
 
-        container = tk.Frame(f)
-        container.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+    def _update_rawdata_count(self):
+        if self._rawdata_tree is None or self._rawdata_count_label is None:
+            return
+        shown = len(self._rawdata_tree.get_children())
+        total = len(self._rawdata_tree.get_raw_rows())
+        self._rawdata_count_label.config(text=f"{shown} / {total}건 표시")
 
-        self.history_tree = EditableTreeview(
-            container, columns=HISTORY_COLUMNS, on_cell_edited=self._on_history_edited,
+    def _export_rawdata_to_excel(self):
+        self._export_tree_to_excel(self._rawdata_tree, "PUMP 판가 DATA", "PUMP_판가_DATA")
+
+    def _export_history_to_excel(self):
+        self._export_tree_to_excel(self._history_tree, "이력", "이력")
+
+    def _export_tree_to_excel(self, tree, sheet_name, default_filename):
+        """현재 화면에 표시된(검색/정렬 적용된) 내용을 .xlsx로 내보낸다 (요청사항)."""
+        if tree is None or not tree.get_children():
+            messagebox.showinfo("엑셀로 내보내기", "내보낼 데이터가 없습니다.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="엑셀로 내보내기", defaultextension=".xlsx",
+            filetypes=[("Excel 파일", "*.xlsx")], initialfile=default_filename,
         )
-        for col in HISTORY_COLUMNS:
-            self.history_tree.heading(col, text=col)
-            width = 60 if col == "No." else 110
-            self.history_tree.column(col, width=width, anchor="center")
+        if not path:
+            return
+        rows = [list(tree.item(iid)["values"]) for iid in tree.get_children()]
+        try:
+            export_rows_to_xlsx(path, sheet_name, tree.headers, rows)
+        except OSError as e:
+            messagebox.showerror("내보내기 실패", f"엑셀 파일을 저장하지 못했습니다.\n{e}")
+            return
+        messagebox.showinfo("내보내기 완료", f"{len(rows)}건을 저장했습니다.\n{path}")
 
-        vsb = ttk.Scrollbar(container, orient="vertical", command=self.history_tree.yview)
-        hsb = ttk.Scrollbar(container, orient="horizontal", command=self.history_tree.xview)
-        self.history_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    # ---------------------------------------------------------------- 이력 새창 (요청사항 2, 5, 6, 7, 11)
+    def _open_history_window(self, select_no=None):
+        if self._history_win is not None and self._history_win.winfo_exists():
+            self._history_win.lift()
+            self._history_win.focus_force()
+            self._reload_history_window(select_no=select_no)
+            return
 
-        self.history_tree.grid(row=0, column=0, sticky="nsew")
+        win = tk.Toplevel(self)
+        win.title("이력")
+        win.configure(bg=COLOR_BG)
+        maximize_window(win)
+        self._history_win = win
+
+        top = tk.Frame(win, bg=COLOR_BG)
+        top.pack(fill="x", padx=18, pady=14)
+        tk.Label(top, text="이력", font=FONT_TITLE, bg=COLOR_BG, fg=COLOR_TEXT).pack(side="left")
+        tk.Label(top, text="  셀 더블클릭으로 수정", font=("Malgun Gothic", 10), bg=COLOR_BG,
+                 fg=COLOR_SUBTEXT).pack(side="left")
+        ttk.Button(top, text="닫기", command=win.destroy).pack(side="right")
+        ttk.Button(top, text="새로고침", command=self._reload_history_window).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="엑셀로 내보내기", command=self._export_history_to_excel).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="선택 삭제", command=self._on_delete_selected_history).pack(side="right", padx=(0, 8))
+
+        search_bar = tk.Frame(win, bg=COLOR_BG)
+        search_bar.pack(fill="x", padx=18, pady=(0, 12))
+        tk.Label(search_bar, text="🔍 검색", font=FONT_BASE, bg=COLOR_BG, fg=COLOR_TEXT).pack(side="left")
+        self._history_search_var = tk.StringVar()
+        search_entry = tk.Entry(search_bar, textvariable=self._history_search_var, font=FONT_BASE,
+                                 relief="solid", bd=1, highlightthickness=0, width=32)
+        search_entry.pack(side="left", padx=8, ipady=4)
+        self._history_search_var.trace_add("write", lambda *a: self._apply_history_filter())
+        self._history_count_label = tk.Label(search_bar, text="", font=("Malgun Gothic", 9),
+                                              bg=COLOR_BG, fg=COLOR_SUBTEXT)
+        self._history_count_label.pack(side="left", padx=6)
+
+        container_outer, container = self._card(win)
+        container_outer.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+
+        tree_frame = tk.Frame(container, bg=COLOR_CARD)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        tree = DataTreeview(tree_frame, HISTORY_COLUMNS, editable=True, choice_map=HISTORY_CHOICE_MAP,
+                             on_change=self._on_history_changed, on_cell_change=self._on_history_cell_edited,
+                             sort_column="No.", sort_desc=True)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        container.grid_rowconfigure(0, weight=1)
-        container.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
 
-    def _load_history(self):
-        for item in self.history_tree.get_children():
-            self.history_tree.delete(item)
+        self._history_tree = tree
+        self._reload_history_window(select_no=select_no)
+
+    def _reload_history_window(self, select_no=None):
+        if self._history_tree is None:
+            return
         rows = load_csv_rows(HISTORY_CSV, HISTORY_COLUMNS)
-        for row in rows:
-            self.history_tree.insert("", tk.END, values=row)
+        self._history_tree.set_rows(rows)
+        if self._history_search_var is not None:
+            self._history_search_var.set("")
+        self._update_history_count()
+        if select_no is not None:
+            self._select_history_no(select_no)
 
-    def _on_history_edited(self, row_id, col, value):
-        self._persist_treeview(self.history_tree, HISTORY_COLUMNS, HISTORY_CSV)
+    def _apply_history_filter(self):
+        if self._history_tree is None:
+            return
+        self._history_tree.apply_filter(self._history_search_var.get())
+        self._update_history_count()
 
-    def _persist_treeview(self, tree, columns, path):
-        rows = [tree.item(item)["values"] for item in tree.get_children()]
-        save_csv_rows(path, columns, rows)
+    def _update_history_count(self):
+        if self._history_tree is None or self._history_count_label is None:
+            return
+        shown = len(self._history_tree.get_children())
+        total = len(self._history_tree.get_raw_rows())
+        self._history_count_label.config(text=f"{shown} / {total}건 표시")
+
+    def _select_history_no(self, no_value):
+        if self._history_tree is None:
+            return
+        for idx, row in enumerate(self._history_tree.get_raw_rows()):
+            if row and str(row[0]).strip() == str(no_value):
+                iid = str(idx)
+                if self._history_tree.exists(iid):
+                    self._history_tree.selection_set(iid)
+                    self._history_tree.see(iid)
+                break
+
+    def _on_history_changed(self):
+        if self._history_tree is None:
+            return
+        save_history_csv(self._history_tree.get_raw_rows())
+        self._update_history_count()
+
+    def _on_history_cell_edited(self, row_index, header, old_value, new_value):
+        """이력 셀 수정 시 시간/셀위치/변경내용을 텍스트 로그로 남긴다 (요청사항)."""
+        tree = self._history_tree
+        if tree is None:
+            return
+        raw_rows = tree.get_raw_rows()
+        row = raw_rows[row_index] if 0 <= row_index < len(raw_rows) else None
+        no_value = row[HISTORY_COLUMNS.index("No.")] if row else None
+
+        # No.만으로는 어떤 항목인지 바로 떠올리기 어려우므로, 장비 모델을 함께 남겨
+        # 어떤 이력인지 더 쉽게 알아볼 수 있게 한다.
+        context_label = ""
+        if row:
+            model_value = row[HISTORY_COLUMNS.index("장비 모델")]
+            if model_value:
+                context_label = f"장비 모델: {model_value}"
+
+        old_display = tree.format_cell(header, old_value)
+        new_display = tree.format_cell(header, new_value)
+        append_history_edit_log(no_value, context_label, header, old_display, new_display)
+
+    def _on_delete_selected_history(self):
+        """선택한 이력 행을 삭제한다 (요청사항). 삭제 전 확인을 받고, 로그에도 남긴다."""
+        tree = self._history_tree
+        if tree is None:
+            return
+        selected_iids = tree.selection()
+        if not selected_iids:
+            messagebox.showinfo("이력 삭제", "삭제할 행을 먼저 선택하세요.")
+            return
+
+        indices = sorted(int(iid) for iid in selected_iids)
+        raw_rows = tree.get_raw_rows()
+        no_values = [raw_rows[i][HISTORY_COLUMNS.index("No.")] for i in indices if i < len(raw_rows)]
+        no_list_text = ", ".join(f"No.{n}" for n in no_values)
+        if not messagebox.askyesno(
+            "이력 삭제",
+            f"{len(indices)}건({no_list_text})을 삭제하시겠습니까?\n삭제 후에는 이 화면에서 되돌릴 수 없습니다.\n"
+            f"(단, data/backups 폴더에 삭제 전 상태가 자동 백업되어 있습니다.)",
+        ):
+            return
+
+        removed = tree.delete_rows_by_index(indices)  # on_change 콜백이 저장까지 처리
+        for row_index, row in removed:
+            no_value = row[HISTORY_COLUMNS.index("No.")] if row else None
+            model_value = row[HISTORY_COLUMNS.index("장비 모델")] if row else ""
+            context_label = f"장비 모델: {model_value}" if model_value else ""
+            cost_display = tree.format_cell("재료비(원가)", row[HISTORY_COLUMNS.index("재료비(원가)")]) if row else ""
+            summary = f"재료비(원가) {cost_display}원" if cost_display else "(재료비 정보 없음)"
+            append_history_delete_log(no_value, context_label, summary)
 
     # ---------------------------------------------------------------- 계산 / 재계산
     def _recalc(self):
@@ -571,7 +1441,6 @@ class PumpPriceApp(tk.Tk):
         )
         self._last_result = result
 
-        # 판가계산기 탭 요약
         self.summary_label.config(text=(
             f"재료비(원가)      : {fmt_won(result['재료비'])} 원\n"
             f"노무비+경비       : {fmt_won(result['노무비+경비'])} 원\n"
@@ -581,7 +1450,6 @@ class PumpPriceApp(tk.Tk):
             f"적정 판가         : {fmt_won(result['적정판가'])} 원"
         ))
 
-        # Sheet3 탭 갱신
         if self.calc_labels:
             self.calc_labels["재료비_금액"].config(text=fmt_won(result["재료비"]))
             self.calc_labels["노무비_금액"].config(text=fmt_won(result["노무비+경비"]))
@@ -595,11 +1463,17 @@ class PumpPriceApp(tk.Tk):
 
         save_settings(self.settings)
 
-    # ---------------------------------------------------------------- 이력등록
+    # ---------------------------------------------------------------- 이력등록 (요청사항 3)
     def _on_register_history(self):
-        values = run_register_history_wizard(self, self._last_result["적정판가"])
+        summary = (
+            f"재료비(원가) {fmt_won(self.settings['material_cost'])}원 · "
+            f"영업이익률 {self.settings['profit_margin']*100:.0f}% · "
+            f"적정 판가 {fmt_won(self._last_result['적정판가'])}원 으로 등록합니다."
+        )
+        dlg = HistoryRegisterDialog(self, summary)
+        values = dlg.result
         if values is None:
-            return  # 사용자가 중간에 취소 -> 원본과 동일하게 아무 것도 등록하지 않음
+            return  # 사용자가 취소 -> 원본과 동일하게 아무 것도 등록하지 않음
 
         existing_rows = load_csv_rows(HISTORY_CSV, HISTORY_COLUMNS)
         if existing_rows:
@@ -611,11 +1485,10 @@ class PumpPriceApp(tk.Tk):
             next_no = 1
 
         today = datetime.date.today().strftime("%Y-%m-%d")
-        # 원본 VBA와 동일하게 서식 없는 raw 숫자값으로 기록한다.
-        # (L=재료비(원가) raw, M=영업이익률 raw fraction, N=계산금액 raw)
         material_cost_raw = self.settings["material_cost"]
         profit_margin_raw = self.settings["profit_margin"]
         calc_amount_raw = self._last_result["적정판가"]
+        note_text = self._build_note_with_ratio_changes(values["v_note"])
         new_row = [
             next_no,
             today,
@@ -638,13 +1511,36 @@ class PumpPriceApp(tk.Tk):
             values["v_fscToBe"],
             values["v_sec"],
             values["v_lot"],
-            values["v_note"],
+            note_text,
         ]
         existing_rows.append(new_row)
-        save_csv_rows(HISTORY_CSV, HISTORY_COLUMNS, existing_rows)
-        self._load_history()
-        self.notebook.select(self.tab_history)
+        save_history_csv(existing_rows)
+
+        register_summary = (
+            f"재료비(원가) {fmt_won(material_cost_raw)}원 · 영업이익률 {profit_margin_raw*100:.0f}% · "
+            f"계산금액 {fmt_won(calc_amount_raw)}원"
+        )
+        append_history_register_log(next_no, f"장비 모델: {values['v_model']}" if values["v_model"] else "",
+                                     register_summary)
+
         messagebox.showinfo("이력등록", f"이력이 등록되었습니다. (No. {next_no})")
+        # 팝업이 계속 뜨는 대신, 등록된 내용을 바로 이력 창에서 확인할 수 있도록 연다.
+        self._open_history_window(select_no=next_no)
+
+    def _build_note_with_ratio_changes(self, manual_note):
+        """노무비+경비/판관비 비율이 기본값(20%/30%)이 아니면 비고에 자동으로 남긴다 (요청사항).
+        예: 노무비+경비 10% 반영, 판관비 5% 반영"""
+        auto_notes = []
+        labor_ratio = self.settings["labor_expense_ratio"]
+        sga_ratio = self.settings["sga_ratio"]
+        if abs(labor_ratio - DEFAULT_SETTINGS["labor_expense_ratio"]) > 1e-9:
+            auto_notes.append(f"노무비+경비 {labor_ratio*100:.0f}% 반영")
+        if abs(sga_ratio - DEFAULT_SETTINGS["sga_ratio"]) > 1e-9:
+            auto_notes.append(f"판관비 {sga_ratio*100:.0f}% 반영")
+        if not auto_notes:
+            return manual_note
+        auto_text = ", ".join(auto_notes)
+        return f"{manual_note} ({auto_text})" if manual_note else auto_text
 
 
 if __name__ == "__main__":

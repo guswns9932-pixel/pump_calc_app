@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 실행 중 자동 생성되는 개인/로컬 데이터 (배포 시 data/ 폴더는 그대로 유지하되,
+# 백업·설정·로그는 사용자별로 생기는 파일이라 저장소에는 남기지 않는다)
+data/backups/
+data/settings.json
+data/history_edit_log.txt
+
+# PyInstaller 빌드 산출물
+build/
+dist/
+*.spec.bak
