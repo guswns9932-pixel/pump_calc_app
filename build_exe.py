@@ -14,9 +14,12 @@ PyInstaller는 실행하는 OS용 실행 파일만 만들 수 있으므로(크�
     # 이름을 지정하지 않으면 실행 중 물어본다 (엔터만 누르면 기본값 사용)
     python build_exe.py
 
-완료되면 dist\\<지정한 이름>.exe 가 생성된다. 이 exe와 data 폴더를 같은
-폴더에 두고 실행하면 된다 (data 폴더는 exe 안에 포함하지 않는다 — 이력을
-새로 등록/수정할 때마다 exe 옆의 data 폴더에 그대로 저장되어야 하기 때문에,
+--onedir로 빌드하므로, 완료되면 dist\\<지정한 이름>\\ 폴더가 통째로 생성되고 그
+안에 <지정한 이름>.exe와 실행에 필요한 파일들이 함께 들어있다 (단일 exe로 압축하는
+--onefile과 달리 실행할 때마다 임시 폴더에 풀 필요가 없어 시작 속도가 더 빠르다).
+배포할 때는 dist\\<지정한 이름>\\ 폴더 전체를 옮겨야 하며, 그 폴더 안에 data 폴더를
+같이 두고 실행하면 된다 (data 폴더는 exe 안에 포함하지 않는다 — 이력을 새로
+등록/수정할 때마다 exe와 같은 폴더의 data 폴더에 그대로 저장되어야 하기 때문에,
 읽기 전용으로 번들에 굳어지는 --add-data 방식을 쓰지 않았다. pump_calc_app.py의
 BASE_DIR 계산이 frozen(exe) 상태를 감지해 exe가 있는 폴더를 기준으로 삼는다).
 """
@@ -73,7 +76,7 @@ def main():
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile",
+        "--onedir",
         "--windowed",  # 콘솔 창 없이 실행 (Windows)
         "--name", app_name,
         "--noconfirm",
@@ -82,11 +85,11 @@ def main():
     print("실행:", " ".join(cmd))
     subprocess.run(cmd, check=True, cwd=here)
 
-    dist_dir = os.path.join(here, "dist")
+    app_dir = os.path.join(here, "dist", app_name)
     print()
-    print(f"완료: {dist_dir} 폴더에 {app_name}.exe 실행 파일이 생성되었습니다.")
-    print("이 실행 파일을 data 폴더와 같은 위치에 두고 실행하세요")
-    print("(기존 사용자라면 원래 쓰던 data 폴더를 그대로 옆에 복사해 오면 이력이 유지됩니다).")
+    print(f"완료: {app_dir} 폴더에 {app_name}.exe 실행 파일이 생성되었습니다.")
+    print(f"이 {app_name} 폴더 전체를 옮겨서, 그 안에 data 폴더를 같이 두고 실행하세요")
+    print("(기존 사용자라면 원래 쓰던 data 폴더를 그대로 이 폴더 안에 복사해 오면 이력이 유지됩니다).")
 
 
 if __name__ == "__main__":
